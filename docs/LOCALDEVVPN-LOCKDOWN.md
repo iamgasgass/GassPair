@@ -10,6 +10,14 @@ GassPair currently implements Remote Pairing (RPPairing), not the classic Lockdo
 
 It sends no `Pair` or `CUPairingCreate` request and writes no pairing record.
 
+The timeout diagnostic distinguishes these cases:
+
+- **TCP never reached ready:** address, route, tunnel configuration, or port reachability issue; no request was confirmed sent.
+- **TCP ready, zero reply bytes:** the socket handshake succeeded, but `QueryType` received no response. This is different from a failed route and points toward the destination endpoint, packet path, or a silently ignored request.
+- **Partial response bytes:** the peer sent something, but it did not complete a valid length-prefixed plist frame before the deadline.
+
+The 12-second timeout covers the entire probe, so an unusually slow TCP handshake can leave less time for the protocol round-trip. The diagnostic is evidence about transport only, not proof of pairing support.
+
 ## Why this is not yet a classic pairing implementation
 
 The `idevicepair -w` code path invokes Companion User (CU) pairing and the PIN/SRP exchange. Public libimobiledevice documentation says that CU pairing is currently supported by Apple TV devices; its `lockdownd_cu_pairing_create` API is documented with the same limitation. iOS/iPadOS self-initiated development pairing uses the separate Remote Pairing (RPPairing) flow on supported versions.

@@ -18,9 +18,12 @@ final class LocalDevVPNProbeModel: ObservableObject {
     private var received = Data()
     private var expectedLength: Int?
     private var sentInitialRequest = false
+    private var connectionBecameReady = false
+    private var requestWasSent = false
+    private var activeRequestName = "QueryType"
     private var expectedReply: ReplyKind = .queryType
 
-    private enum ReplyKind {
+    private enum ReplyKind: Equatable {
         case queryType
         case productVersion
     }
@@ -57,6 +60,9 @@ final class LocalDevVPNProbeModel: ObservableObject {
         received.removeAll(keepingCapacity: true)
         expectedLength = nil
         sentInitialRequest = false
+        connectionBecameReady = false
+        requestWasSent = false
+        activeRequestName = "QueryType"
         expectedReply = .queryType
         isBusy = true
         isReachable = nil
@@ -78,8 +84,9 @@ final class LocalDevVPNProbeModel: ObservableObject {
                 case .ready:
                     guard !self.sentInitialRequest else { return }
                     self.sentInitialRequest = true
+                    self.connectionBecameReady = true
                     self.title = "TCP connected"
-                    self.details = "The socket opened. Checking whether the service speaks Lockdown plist."
+                    self.details = "TCP handshake succeeded. Sending the Lockdown QueryType request."
                     self.send(
                         ["Label": "GassPair LocalDevVPN diagnostic", "Request": "QueryType"],
                         expecting: .queryType,
@@ -109,7 +116,7 @@ final class LocalDevVPNProbeModel: ObservableObject {
                 self.finish(
                     token,
                     title: "Timed out",
-                    details: "No complete Lockdown response arrived within 12 seconds. The route may not reach the device's lockdownd socket, or the endpoint may silently drop this traffic.",
+                    details: self.timeoutExplanation(host: host),
                     reachable: false)
             }
         }
@@ -145,6 +152,8 @@ final class LocalDevVPNProbeModel: ObservableObject {
             withUnsafeBytes(of: &length) { framed.append(contentsOf: $0) }
             framed.append(body)
             expectedReply = reply
+            activeRequestName = reply == .queryType ? "QueryType" : "GetValue(ProductVersion)"
+            requestWasSent = false
             received.removeAll(keepingCapacity: true)
             expectedLength = nil
 
@@ -155,6 +164,8 @@ final class LocalDevVPNProbeModel: ObservableObject {
                         self.finish(token, title: "Send failed", details: "The Lockdown request could not be sent: \(error.localizedDescription)", reachable: false)
                         return
                     }
+                    self.requestWasSent = true
+                    self.details = "TCP connected; \(self.activeRequestName) sent. Waiting for a Lockdown reply."
                     self.receive(on: connection, token: token)
                 }
             })
@@ -173,6 +184,7 @@ final class LocalDevVPNProbeModel: ObservableObject {
                 }
                 if let data, !data.isEmpty {
                     self.received.append(data)
+                    self.details = "Received \(self.received.count) response byte(s) for \(self.activeRequestName); assembling the plist frame."
                 }
                 do {
                     if let frame = try self.extractFrame() {
@@ -187,6 +199,23 @@ final class LocalDevVPNProbeModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func timeoutExplanation(host: String) -> String {
+        guard connectionBecameReady else {
+            return "Timed out while opening TCP to \(host):62078: NWConnection never reached the ready state. This points to the destination address, LocalDevVPN route, or a filtered/unreachable port; no Lockdown request was confirmed sent."
+        }
+        guard requestWasSent else {
+            return "TCP to \(host):62078 reached the ready state, but the \(activeRequestName) send did not complete before the 12-second deadline. Check the tunnel/provider logs for the packet path."
+        }
+        guard !received.isEmpty else {
+            return "TCP to \(host):62078 connected and \(activeRequestName) was sent, but zero response bytes arrived within 12 seconds. The route may reach a TCP endpoint without reaching lockdownd, or the endpoint may silently drop/ignore the request."
+        }
+        if expectedLength == nil {
+            return "TCP connected and \(activeRequestName) was sent. Received only \(received.count) byte(s), not enough for Lockdown's 4-byte response-length header, before the 12-second deadline. The peer may be speaking another protocol or the response may be truncated."
+        }
+        let expected = expectedLength ?? 0
+        return "TCP connected and \(activeRequestName) was sent. Received \(received.count) of \(expected) expected plist body bytes before the 12-second deadline. The peer began a framed response but did not finish it."
     }
 
     private func extractFrame() throws -> Data? {
