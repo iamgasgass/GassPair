@@ -25,11 +25,13 @@ Il file risultante si esporta con **Export Pairing File** ed è anche in **File 
 
 ## Diagnostica LocalDevVPN
 
-1. Attiva LocalDevVPN e annota l'indirizzo di destinazione che vuoi verificare.
-2. In GassPair tocca **Test LocalDevVPN → Lockdown** e inserisci quell'indirizzo (non assumere che `127.0.0.1`, l'IP dell'interfaccia VPN e l'IP peer siano equivalenti).
-3. GassPair apre TCP `62078`, invia `QueryType` e `GetValue(ProductVersion)` come plist Lockdown e mostra il risultato.
+1. Connetti LocalDevVPN e attendi lo stato **Connected**. Collega l'iPhone a una rete Wi-Fi effettiva: il progetto LocalDevVPN ha un problema documentato in alcune condizioni di sola rete cellulare.
+2. In GassPair tocca **Test LocalDevVPN → Lockdown** e usa il valore **Device/Peer IP** configurato in LocalDevVPN, non il tunnel/interface IP.
+3. Inserisci un host, non una rete. Per esempio, `10.7.0.1` è un host; `10.7.0.1/32` è una notazione CIDR. GassPair riconosce e rimuove automaticamente `/32` o `/128`; una subnet come `/24` viene rifiutata invece di essere interpretata arbitrariamente come host.
+4. Esegui prima **TCP only**: se non raggiunge `ready`, nessun comando Lockdown viene inviato. Se TCP riesce, esegui **TCP + Lockdown**, che verifica `QueryType` e `GetValue(ProductVersion)`.
+5. Puoi condividere il rapporto diagnostico, che include la destinazione normalizzata, le transizioni di `NWConnection`, i byte ricevuti e la fase esatta del timeout.
 
-Un esito positivo conferma solo il percorso TCP e il protocollo plist. Non prova che `Pair` o `CUPairingCreate` siano consentiti sull'iPhone e non genera un pairing file. Il progetto evita deliberatamente di presentare un file non valido come successo.
+Un esito positivo conferma solo il percorso TCP e, nella modalità completa, il protocollo plist. Non prova che `Pair` o `CUPairingCreate` siano consentiti sull'iPhone e non genera un pairing file. GassPair non può ispezionare o correggere la route Network Extension di LocalDevVPN; se TCP non arriva a `ready`, prima va risolto il trasporto. Il progetto evita deliberatamente di presentare un file speculativo come successo.
 
 ## Uso
 
@@ -69,13 +71,14 @@ Carica tutta la cartella (ad es. con l'app iOS *Working Copy*). Il workflow `.gi
 ### Build locale (facoltativa, su Mac)
 
 ```sh
+./tools/test-localdevvpn-destination.sh  # host/CIDR parser tests; macOS or Linux with Swift
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 ./build-rust.sh      # Rust FFI -> GassPairFFI.xcframework
 xcodegen generate    # GassPair.xcodeproj
 open GassPair.xcodeproj
 ```
 
-Requisiti per compilare: Xcode 27, Rust, `xcodegen`. App minima: **iOS 16**.
+Requisiti per la build iOS: Xcode 27, Rust, `xcodegen`. App minima: **iOS 16**. Il test del parser non richiede Xcode e controlla gli input IPv4/IPv6, CIDR, hostname e input malformati.
 
 ## Architettura
 
