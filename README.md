@@ -103,3 +103,10 @@ Run `tools/test-lockdown-frame-index.sh` to execute the regression test on a mac
 Dopo `Lockdown is reachable`, la sezione **Experimental classic Lockdown pairing** consente di confermare esplicitamente un tentativo reale `Request=Pair` sull'host configurato. Il backend Rust usa la libreria `idevice`, genera un `HostID` e un `SystemBUID` locali, gestisce gli errori restituiti da Lockdown, tenta `StartSession` TLS e scrive `classic_lockdown_pairing_file.plist` atomicamente solo dopo il successo della sessione e il read-back del plist. Il flusso è distinto dal Remote Pairing (RPPairing).
 
 Limiti: questa è una prova sperimentale e non è stata validata su un iPhone reale in questa build environment. Un `SystemBUID` locale non è quello del Mac/usbmuxd e non è garantito che il file sia importabile nel pairing store del Mac. La funzione non implementa il protocollo CU/SRP di `idevicepair -w`; iOS può rifiutare `Pair` su una connessione self-routed. Non verrà creato alcun file in caso di errore o mancata verifica TLS.
+
+
+## Rust build fixes (2.3.1)
+
+Corrected the Classic Lockdown Pair backend to match the pinned `idevice` API: `QueryType` is sent through `LockdownClient.idevice.get_type()`, and `start_session` is called with the single `PairingFile` parameter expected by the pinned revision. Added `uuid` as a direct Cargo dependency because the FFI backend calls `uuid::Uuid::new_v4()` for `HostID`, local `SystemBUID`, and temporary filenames.
+
+The Swift regression scripts pass in this environment. A full `cargo build` / Xcode build still must be run by CI or on a machine with the Rust iOS targets and Xcode installed; these source fixes should not be described as a successful device build until that run passes.

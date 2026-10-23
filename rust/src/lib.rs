@@ -535,7 +535,7 @@ pub unsafe extern "C" fn gasspair_classic_lockdown_pair(
                     "GassPair classic Lockdown pairing",
                 );
                 let mut lockdown = LockdownClient::new(idevice);
-                let service_type = lockdown.get_type().await
+                let service_type = lockdown.idevice.get_type().await
                     .map_err(|e| format!("Lockdown QueryType failed: {e}"))?;
                 if service_type != "com.apple.mobile.lockdown" {
                     return Err(format!("Unexpected Lockdown service type: {service_type}"));
@@ -553,7 +553,7 @@ pub unsafe extern "C" fn gasspair_classic_lockdown_pair(
                     .await
                     .map_err(|e| format!("Lockdown Pair rejected or failed on iOS {version}: {e}. No pairing file was written."))?;
                 lockdown
-                    .start_session(&record, false)
+                    .start_session(&record)
                     .await
                     .map_err(|e| format!("Pair returned a record, but StartSession TLS verification failed: {e}. No pairing file was written."))?;
                 let bytes = record
