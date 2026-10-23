@@ -110,3 +110,8 @@ Limiti: questa è una prova sperimentale e non è stata validata su un iPhone re
 Corrected the Classic Lockdown Pair backend to match the pinned `idevice` API: `QueryType` is sent through `LockdownClient.idevice.get_type()`, and `start_session` is called with the single `PairingFile` parameter expected by the pinned revision. Added `uuid` as a direct Cargo dependency because the FFI backend calls `uuid::Uuid::new_v4()` for `HostID`, local `SystemBUID`, and temporary filenames.
 
 The Swift regression scripts pass in this environment. A full `cargo build` / Xcode build still must be run by CI or on a machine with the Rust iOS targets and Xcode installed; these source fixes should not be described as a successful device build until that run passes.
+
+
+### Classic Lockdown Pair refusal (2.3.2)
+
+When the device returns `GetProhibited` to `Request=Pair`, the backend now reports an explicit device-side refusal, does not retry, and does not write a pairing record. A successful TCP/Lockdown diagnostic does not override this refusal. Use the supported Remote Pairing flow for iPhone/iPad; CU/SRP via `idevicepair -w` is documented for Apple TV and is a different protocol.

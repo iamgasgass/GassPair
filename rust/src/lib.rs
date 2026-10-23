@@ -548,10 +548,22 @@ pub unsafe extern "C" fn gasspair_classic_lockdown_pair(
                 // on-device experiment, use a valid persisted-format UUID and report it.
                 // It is not claimed to be shared with a Mac/usbmuxd pairing database.
                 let system_buid = uuid::Uuid::new_v4().to_string();
-                let record = lockdown
+                let record = match lockdown
                     .pair_once(host_id, system_buid, Some("GassPair LocalDevVPN"))
                     .await
-                    .map_err(|e| format!("Lockdown Pair rejected or failed on iOS {version}: {e}. No pairing file was written."))?;
+                {
+                    Ok(record) => record,
+                    Err(idevice::IdeviceError::GetProhibited) => {
+                        return Err(format!(
+                            "iOS {version} explicitly prohibited classic Lockdown Pair on this connection (GetProhibited). TCP and Lockdown plist diagnostics are working, but the device refuses this pairing method. GassPair will not retry, bypass the refusal, or create a synthetic pairing record. Use Apple's supported Remote Pairing flow for iPhone/iPad; the documented idevicepair -w CU/SRP flow is for Apple TV. No pairing file was written."
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "Classic Lockdown Pair failed on iOS {version}: {error}. No pairing file was written."
+                        ));
+                    }
+                };
                 lockdown
                     .start_session(&record)
                     .await

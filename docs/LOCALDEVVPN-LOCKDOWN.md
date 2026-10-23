@@ -29,3 +29,10 @@ References:
 - https://github.com/libimobiledevice/libimobiledevice/blob/master/include/libimobiledevice/lockdown.h
 - https://github.com/jkcoxson/LocalDevVPN/issues/31
 - https://github.com/jkcoxson/idevice_pair#over-wi-fi-with-iphone-or-ipad
+
+
+## Device-observed result on iOS 26.1
+
+The reported test succeeded for TCP, `QueryType`, and `GetValue(ProductVersion)` (`26.1`), but the subsequent real `Request=Pair` returned `GetProhibited` (“this request was prohibited”). Treat this as an explicit device-side refusal of classic Lockdown pairing over this connection, not a VPN routing or plist framing failure. GassPair maps this response to a specific explanation, performs no automatic retry, does not attempt a protocol bypass, and never writes a pairing record for this failure.
+
+This result does not establish that every Lockdown operation is prohibited; it establishes that this pairing request was rejected. Do not attempt to work around the refusal by changing identifiers, fabricating records, or repeating requests. For iPhone/iPad, use the supported Remote Pairing workflow. The `idevicepair -w` CU/SRP workflow documented publicly is an Apple TV capability and is not interchangeable with classic Lockdown `Pair`.
