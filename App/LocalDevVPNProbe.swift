@@ -96,7 +96,9 @@ final class LocalDevVPNProbeModel: ObservableObject {
         stopCurrentConnection()
         generation &+= 1
         let token = generation
-        received.removeAll(keepingCapacity: true)
+        // Data can retain a non-zero startIndex after removeFirst(). Recreate it
+        // instead of clearing in place, so a new Lockdown response starts at index 0.
+        received = Data()
         expectedLength = nil
         sentInitialRequest = false
         connectionBecameReady = false
@@ -299,7 +301,10 @@ final class LocalDevVPNProbeModel: ObservableObject {
             expectedReply = reply
             activeRequestName = reply == .queryType ? "QueryType" : "GetValue(ProductVersion)"
             requestWasSent = false
-            received.removeAll(keepingCapacity: true)
+            // Never reuse a Data whose indices may have advanced while decoding the
+            // previous frame. The second Lockdown round-trip previously could subscript
+            // received[0] with startIndex > 0 and crash the app.
+            received = Data()
             expectedLength = nil
             record("Sending \(activeRequestName): \(body.count)-byte XML plist plus 4-byte big-endian length header")
 
@@ -366,21 +371,28 @@ final class LocalDevVPNProbeModel: ObservableObject {
     private func extractFrame() throws -> Data? {
         if expectedLength == nil {
             guard received.count >= 4 else { return nil }
-            let length = (Int(received[0]) << 24)
-                | (Int(received[1]) << 16)
-                | (Int(received[2]) << 8)
-                | Int(received[3])
+            // Data is a Collection whose startIndex may be non-zero after removeFirst.
+            // Index relative to its current start, never literal indices 0...3.
+            let start = received.startIndex
+            let b0 = Int(received[received.index(start, offsetBy: 0)])
+            let b1 = Int(received[received.index(start, offsetBy: 1)])
+            let b2 = Int(received[received.index(start, offsetBy: 2)])
+            let b3 = Int(received[received.index(start, offsetBy: 3)])
+            let length = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
             guard length > 0, length <= maxFrameBytes else {
                 throw ProbeError.invalidFrameLength(length)
             }
             expectedLength = length
-            received.removeFirst(4)
+            // Rebase indices to zero after dropping the prefix. This also makes the
+            // remaining partial body safe for future appends and reads.
+            received = Data(received.dropFirst(4))
             record("Lockdown frame header parsed; expected plist body = \(length) byte(s)")
         }
 
         guard let length = expectedLength, received.count >= length else { return nil }
         let frame = Data(received.prefix(length))
-        received.removeFirst(length)
+        // Explicitly rebase leftovers rather than retaining a shifted Data index.
+        received = Data(received.dropFirst(length))
         expectedLength = nil
         return frame
     }

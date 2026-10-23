@@ -89,3 +89,10 @@ Requisiti per la build iOS: Xcode 27, Rust, `xcodegen`. App minima: **iOS 16**. 
 ## Licenza
 
 MIT, **non commerciale**. Libero per uso personale/non commerciale; per uso commerciale contattare StephenDev0@outlook.com. Vedi [LICENSE](LICENSE).
+
+
+## LocalDevVPN TCP + Lockdown crash fix (2.2.1)
+
+Fixed a `Foundation.Data` index bug in the two-request diagnostic. `Data.removeFirst()` can advance `startIndex`; indexing its next response as `received[0]...received[3]` could trap when `QueryType` succeeded and `GetValue(ProductVersion)` started. The parser now uses indices relative to `startIndex`, rebases data after consuming a frame, and initializes fresh receive buffers for each request. A regression test covers sequential frames and fragmented headers/bodies.
+
+Run `tools/test-lockdown-frame-index.sh` to execute the regression test on a machine with Swift installed. This fix addresses the crash path; it does not imply that classic self-pairing is supported by iOS.
