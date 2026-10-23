@@ -44,6 +44,7 @@ use idevice::remote_pairing::{
     RpPairingFile, RpPairingSocket,
 };
 use idevice::IdeviceError;
+use idevice::services::lockdown::LockdownClient;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 use tokio::task::JoinSet;
@@ -487,8 +488,100 @@ pub unsafe extern "C" fn gasspair_result_free(r: *mut GassPairResult) {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn gasspair_string_free(value: *mut c_char) {
+    if !value.is_null() { drop(CString::from_raw(value)); }
+}
+
+#[no_mangle]
 pub extern "C" fn gasspair_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()
+}
+
+
+/// Experimental classic Lockdown pairing over a caller-supplied TCP route.
+/// This is deliberately separate from Remote Pairing and requires an explicit
+/// user action in the UI. It only writes a record after Pair and StartSession
+/// both succeed. A successful network probe alone never calls this function.
+#[no_mangle]
+pub unsafe extern "C" fn gasspair_classic_lockdown_pair(
+    host: *const c_char,
+    out_path: *const c_char,
+    out_error: *mut *mut c_char,
+) -> i32 {
+    if host.is_null() || out_path.is_null() || out_error.is_null() {
+        return GASSPAIR_ERR_INVALID_ARG;
+    }
+    *out_error = ptr::null_mut();
+    let host = opt_str(host, "");
+    let out_path = opt_str(out_path, "");
+    if host.is_empty() || out_path.is_empty() || out_path.contains('\0') {
+        *out_error = raw_cstr("Invalid host or output path.");
+        return GASSPAIR_ERR_INVALID_ARG;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Could not create async runtime: {e}"))?;
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&rt, async {
+            tokio::time::timeout(Duration::from_secs(35), async {
+                let address = if host.contains(':') { format!("[{host}]:62078") } else { format!("{host}:62078") };
+                let stream = TcpStream::connect(&address)
+                    .await
+                    .map_err(|e| format!("TCP connect to {address} failed: {e}"))?;
+                let idevice = idevice::Idevice::new(
+                    Box::new(stream),
+                    "GassPair classic Lockdown pairing",
+                );
+                let mut lockdown = LockdownClient::new(idevice);
+                let service_type = lockdown.get_type().await
+                    .map_err(|e| format!("Lockdown QueryType failed: {e}"))?;
+                if service_type != "com.apple.mobile.lockdown" {
+                    return Err(format!("Unexpected Lockdown service type: {service_type}"));
+                }
+                let version = lockdown.get_value(Some("ProductVersion"), None).await
+                    .map_err(|e| format!("GetValue(ProductVersion) failed: {e}"))?;
+                let version = version.as_string().unwrap_or("unknown").to_string();
+                let host_id = uuid::Uuid::new_v4().to_string();
+                // A stable BUID is normally managed by usbmuxd. For this isolated
+                // on-device experiment, use a valid persisted-format UUID and report it.
+                // It is not claimed to be shared with a Mac/usbmuxd pairing database.
+                let system_buid = uuid::Uuid::new_v4().to_string();
+                let record = lockdown
+                    .pair_once(host_id, system_buid, Some("GassPair LocalDevVPN"))
+                    .await
+                    .map_err(|e| format!("Lockdown Pair rejected or failed on iOS {version}: {e}. No pairing file was written."))?;
+                lockdown
+                    .start_session(&record, false)
+                    .await
+                    .map_err(|e| format!("Pair returned a record, but StartSession TLS verification failed: {e}. No pairing file was written."))?;
+                let bytes = record
+                    .serialize()
+                    .map_err(|e| format!("Could not serialize the verified pairing record: {e}"))?;
+                let target = Path::new(&out_path);
+                if let Some(parent) = target.parent() {
+                    tokio::fs::create_dir_all(parent).await
+                        .map_err(|e| format!("Could not create output directory: {e}"))?;
+                }
+                let tmp = format!("{out_path}.tmp-{}", uuid::Uuid::new_v4());
+                tokio::fs::write(&tmp, &bytes).await
+                    .map_err(|e| format!("Could not write temporary pairing record: {e}"))?;
+                tokio::fs::rename(&tmp, target).await
+                    .map_err(|e| { let _ = std::fs::remove_file(&tmp); format!("Could not atomically install pairing record: {e}") })?;
+                let readback = tokio::fs::read(target).await
+                    .map_err(|e| format!("Could not read back pairing record: {e}"))?;
+                idevice::pairing_file::PairingFile::from_bytes(&readback)
+                    .map_err(|e| format!("Saved file did not parse as a classic pairing record: {e}"))?;
+                Ok::<String, String>(format!("Classic Lockdown Pair and StartSession TLS succeeded on iOS {version}. Saved and re-read verified pairing record: {out_path}. SystemBUID is local to this GassPair attempt; compatibility with usbmuxd/macOS has not been established."))
+            }).await.map_err(|_| "Classic Lockdown pairing timed out after 35 seconds. No success is assumed.".to_string())?
+        })
+    }));
+    match result {
+        Ok(Ok(message)) => { *out_error = raw_cstr(&message); GASSPAIR_OK }
+        Ok(Err(message)) => { *out_error = raw_cstr(&message); GASSPAIR_ERR }
+        Err(payload) => { *out_error = raw_cstr(&format!("Caught internal panic: {}", panic_message(payload.as_ref()))); GASSPAIR_ERR }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@ import Combine
 import Foundation
 import Network
 import SwiftUI
+import GassPairFFI
 
 // MARK: - Probe model
 
@@ -471,6 +472,9 @@ struct LocalDevVPNProbeView: View {
     @StateObject private var model = LocalDevVPNProbeModel()
     @AppStorage("gasspair.localDevVPN.lockdownHost") private var host = "10.7.0.1"
     @State private var mode: LocalDevVPNProbeMode = .tcpOnly
+    @State private var showingClassicPairConfirmation = false
+    @State private var classicPairBusy = false
+    @State private var classicPairResult: String?
 
     var body: some View {
         Form {
@@ -538,6 +542,28 @@ struct LocalDevVPNProbeView: View {
                 }
             }
 
+            if model.title == "Lockdown is reachable", model.isReachable == true {
+                Section("Experimental classic Lockdown pairing") {
+                    Text("This sends a real Request=Pair to the endpoint. iOS may reject self-pairing. A record is exported only if Pair succeeds and a new TLS session starts successfully. This is separate from RPPairing and is not the CU/SRP flow used by idevicepair -w.")
+                        .font(.footnote)
+                    Button {
+                        showingClassicPairConfirmation = true
+                    } label: {
+                        if classicPairBusy {
+                            Label("Attempting classic Pair…", systemImage: "hourglass")
+                        } else {
+                            Label("Attempt Classic Lockdown Pair…", systemImage: "lock.shield")
+                        }
+                    }
+                    .disabled(classicPairBusy || model.isBusy)
+                    if let classicPairResult {
+                        Text(classicPairResult)
+                            .font(.footnote)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+
             if !model.trace.isEmpty {
                 Section("Diagnostic trace") {
                     Text(model.trace.joined(separator: "\n"))
@@ -563,9 +589,48 @@ struct LocalDevVPNProbeView: View {
         }
         .navigationTitle("LocalDevVPN Probe")
         .navigationBarTitleDisplayMode(.inline)
+        .confirmationDialog("Send a real Lockdown Pair request?", isPresented: $showingClassicPairConfirmation, titleVisibility: .visible) {
+            Button("Attempt Pair", role: .destructive) { attemptClassicPair() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This changes pairing state on the destination device if accepted. GassPair will verify StartSession TLS and only then write a classic pairing plist. iOS may refuse this connection. Continue only if you own or are authorized to administer this device.")
+        }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button("Done") { dismiss() }
+            }
+        }
+    }
+
+    private func attemptClassicPair() {
+        guard !classicPairBusy else { return }
+        let normalizedHost: String
+        do {
+            normalizedHost = try LocalDevVPNDestination.parse(host).host
+        } catch {
+            classicPairResult = "Invalid destination: \(error.localizedDescription)"
+            return
+        }
+        let fm = FileManager.default
+        guard let documents = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            classicPairResult = "Could not locate the app Documents directory."
+            return
+        }
+        let output = documents.appendingPathComponent("classic_lockdown_pairing_file.plist").path
+        classicPairBusy = true
+        classicPairResult = "Connecting to \(normalizedHost):62078. No result is assumed until Pair, StartSession TLS, and file read-back validation finish."
+        DispatchQueue.global(qos: .userInitiated).async {
+            var message: UnsafeMutablePointer<CChar>?
+            let rc = normalizedHost.withCString { hostCString in
+                output.withCString { pathCString in
+                    gasspair_classic_lockdown_pair(hostCString, pathCString, &message)
+                }
+            }
+            let text = message.map { String(cString: $0) } ?? (rc == 0 ? "Pairing verified." : "Classic Lockdown pairing failed without a diagnostic message.")
+            if let message { gasspair_string_free(message) }
+            DispatchQueue.main.async {
+                classicPairBusy = false
+                classicPairResult = "\(rc == 0 ? "SUCCESS" : "FAILED (code \(rc))")\n\(text)"
             }
         }
     }

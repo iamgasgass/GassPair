@@ -8,7 +8,7 @@ App SwiftUI per iOS che crea il **pairing file Remote (RPPairing) senza computer
 
 ## Cosa fa
 
-- **Diagnostica LocalDevVPN** — verifica che un indirizzo instradato dal tunnel raggiunga `lockdownd` su TCP `62078` e risponda al protocollo plist (`QueryType` + `ProductVersion`). È una sonda di rete: non invia richieste di pairing e non crea file.
+- **Diagnostica LocalDevVPN** — verifica che un indirizzo instradato dal tunnel raggiunga `lockdownd` su TCP `62078` e risponda al protocollo plist (`QueryType` + `ProductVersion`). Dopo un test positivo, una sezione sperimentale separata permette all’utente di confermare l’invio di una vera richiesta Lockdown `Pair`; il flusso tenta poi `StartSession` TLS e scrive il file solo se la verifica e il read-back riescono.
 
 > **Limite importante su iOS 26.1:** la raggiungibilità di `lockdownd` non abilita automaticamente il pairing classico del dispositivo con sé stesso. La documentazione pubblica di `idevicepair -w` e di `lockdownd_cu_pairing_create` descrive il flusso PIN/CU-SRP come supportato da Apple TV; iPhone/iPad usano il flusso Remote Pairing nelle versioni iOS che lo supportano. LocalDevVPN può cambiare il percorso di rete, ma non aggiunge al demone un protocollo di pairing che il dispositivo non espone. Riferimenti: [idevicepair](https://github.com/libimobiledevice/libimobiledevice/blob/master/docs/idevicepair.1), [lockdownd CU pairing](https://libimobiledevice.org/docs/libimobiledevice/1.4.0/lockdown_8h_a624871ea957a778920ecffe2d75d964f.html).
 
@@ -16,7 +16,7 @@ App SwiftUI per iOS che crea il **pairing file Remote (RPPairing) senza computer
 | --- | --- | --- |
 | **iPhone / iPad** (iOS 27+) | GassPair si annuncia sulla rete locale come "computer" a cui associarsi; il dispositivo stesso si collega da Impostazioni. | Sul dispositivo, in Impostazioni (il codice arriva in notifica, nella Live Activity e negli appunti). |
 | **Apple TV** | GassPair si collega all'Apple TV che è sulla schermata di associazione. | In GassPair (il codice è mostrato sull'Apple TV). |
-| **Diagnostica LocalDevVPN** | Verifica l'accesso al servizio Lockdown su un indirizzo instradato dal tunnel. | Non applicabile: non esegue il pairing. |
+| **Diagnostica LocalDevVPN** | Verifica Lockdown; opzionalmente tenta `Pair` dopo conferma esplicita. | Modalità sperimentale distinta da RPPairing e da CU/SRP. |
 
 Il file risultante si esporta con **Export Pairing File** ed è anche in **File › Sul mio iPhone › GassPair**:
 
@@ -31,7 +31,7 @@ Il file risultante si esporta con **Export Pairing File** ed è anche in **File 
 4. Esegui prima **TCP only**: se non raggiunge `ready`, nessun comando Lockdown viene inviato. Se TCP riesce, esegui **TCP + Lockdown**, che verifica `QueryType` e `GetValue(ProductVersion)`.
 5. Puoi condividere il rapporto diagnostico, che include la destinazione normalizzata, le transizioni di `NWConnection`, i byte ricevuti e la fase esatta del timeout.
 
-Un esito positivo conferma solo il percorso TCP e, nella modalità completa, il protocollo plist. Non prova che `Pair` o `CUPairingCreate` siano consentiti sull'iPhone e non genera un pairing file. GassPair non può ispezionare o correggere la route Network Extension di LocalDevVPN; se TCP non arriva a `ready`, prima va risolto il trasporto. Il progetto evita deliberatamente di presentare un file speculativo come successo.
+Un esito positivo della sola diagnostica conferma solo il percorso TCP e il protocollo plist. La modalità sperimentale invia `Request=Pair`, poi tenta `StartSession` TLS e salva un record Lockdown classico solo dopo esito positivo e verifica di rilettura. Non implementa CU/SRP e non garantisce che iOS 26.1 consenta il self-pairing. Il `SystemBUID` generato localmente non è quello di usbmuxd/macOS: compatibilità con il database pairing del Mac non è stabilita. GassPair non può ispezionare o correggere la route Network Extension di LocalDevVPN; se TCP non arriva a `ready`, prima va risolto il trasporto. Il progetto evita deliberatamente di presentare un file speculativo come successo.
 
 ## Uso
 
@@ -96,3 +96,10 @@ MIT, **non commerciale**. Libero per uso personale/non commerciale; per uso comm
 Fixed a `Foundation.Data` index bug in the two-request diagnostic. `Data.removeFirst()` can advance `startIndex`; indexing its next response as `received[0]...received[3]` could trap when `QueryType` succeeded and `GetValue(ProductVersion)` started. The parser now uses indices relative to `startIndex`, rebases data after consuming a frame, and initializes fresh receive buffers for each request. A regression test covers sequential frames and fragmented headers/bodies.
 
 Run `tools/test-lockdown-frame-index.sh` to execute the regression test on a machine with Swift installed. This fix addresses the crash path; it does not imply that classic self-pairing is supported by iOS.
+
+
+## Classic Lockdown Pair sperimentale (2.3.0)
+
+Dopo `Lockdown is reachable`, la sezione **Experimental classic Lockdown pairing** consente di confermare esplicitamente un tentativo reale `Request=Pair` sull'host configurato. Il backend Rust usa la libreria `idevice`, genera un `HostID` e un `SystemBUID` locali, gestisce gli errori restituiti da Lockdown, tenta `StartSession` TLS e scrive `classic_lockdown_pairing_file.plist` atomicamente solo dopo il successo della sessione e il read-back del plist. Il flusso è distinto dal Remote Pairing (RPPairing).
+
+Limiti: questa è una prova sperimentale e non è stata validata su un iPhone reale in questa build environment. Un `SystemBUID` locale non è quello del Mac/usbmuxd e non è garantito che il file sia importabile nel pairing store del Mac. La funzione non implementa il protocollo CU/SRP di `idevicepair -w`; iOS può rifiutare `Pair` su una connessione self-routed. Non verrà creato alcun file in caso di errore o mancata verifica TLS.

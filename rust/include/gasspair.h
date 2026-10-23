@@ -95,6 +95,15 @@ int32_t gasspair_pair_apple_tv(GassPairSession *session,
                                GassPairResult *out);
 
 void gasspair_result_free(GassPairResult *r);
+// Experimental classic Lockdown Pair over a routed TCP host. Call only after
+// explicit user confirmation. Returns 0 on verified Pair + StartSession and
+// read-back validation; otherwise returns nonzero and puts a diagnostic in
+// out_message (caller must free it with gasspair_result_free? No: use free()).
+int32_t gasspair_classic_lockdown_pair(const char *host,
+                                       const char *out_path,
+                                       char **out_message);
+void gasspair_string_free(char *value);
+
 const char *gasspair_version(void);
 
 #ifdef __cplusplus
