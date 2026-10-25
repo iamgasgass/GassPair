@@ -6,32 +6,25 @@ App SwiftUI per iOS che crea il **pairing file Remote (RPPairing) senza computer
 - **Su iOS 27+** l'iPhone/iPad può associarsi **a se stesso**.
 - **Da iOS 16 a iOS 26** l'app associa una **Apple TV** oppure fa da host per **un altro iPhone/iPad con iOS 27+** sulla stessa Wi-Fi. Un dispositivo con iOS 16–26 non può associarsi a se stesso: la voce «Pair with…» in Modalità sviluppatore esiste solo da iOS 27 (limite di Apple, non dell'app).
 
+## Importare un file RPPairing esistente
+
+La schermata principale include **Import / Validate RP Pairing File**. Accetta un plist esistente, controlla che sia un dizionario con `public_key`, `private_key`, `identifier` e `alt_irk`, verifica le lunghezze (32, 32, UUID valido e 16 byte) e controlla che la chiave pubblica Ed25519 corrisponda alla chiave derivata dalla chiave privata. Se supera i controlli, il file originale viene copiato atomicamente in Documents come `rp_pairing_file_imported.plist`.
+
+**Importante:** questo è un controllo locale d'integrità, non un `pair-verify` remoto. La verifica remota richiede un endpoint RPPairing effettivo (host/porta e ruolo del peer corretti); la porta Lockdown `62078` non è un endpoint RPPairing e non va usata per questo test. Il codice non inventa credenziali né dichiara verificato un record soltanto perché il plist è valido.
+
+I file di pairing contengono una chiave privata e devono essere trattati come segreti. Non incollare chiavi private in issue, log o repository. Poiché la chiave privata inclusa in una conversazione va considerata esposta, genera una nuova identità/record dal client autorizzato e revoca o sostituisci quella precedente prima di usarla per un pairing sensibile.
+
 ## Cosa fa
-
-- **Diagnostica LocalDevVPN** — verifica che un indirizzo instradato dal tunnel raggiunga `lockdownd` su TCP `62078` e risponda al protocollo plist (`QueryType` + `ProductVersion`). Dopo un test positivo, una sezione sperimentale separata permette all’utente di confermare l’invio di una vera richiesta Lockdown `Pair`; il flusso tenta poi `StartSession` TLS e scrive il file solo se la verifica e il read-back riescono.
-
-> **Limite importante su iOS 26.1:** la raggiungibilità di `lockdownd` non abilita automaticamente il pairing classico del dispositivo con sé stesso. La documentazione pubblica di `idevicepair -w` e di `lockdownd_cu_pairing_create` descrive il flusso PIN/CU-SRP come supportato da Apple TV; iPhone/iPad usano il flusso Remote Pairing nelle versioni iOS che lo supportano. LocalDevVPN può cambiare il percorso di rete, ma non aggiunge al demone un protocollo di pairing che il dispositivo non espone. Riferimenti: [idevicepair](https://github.com/libimobiledevice/libimobiledevice/blob/master/docs/idevicepair.1), [lockdownd CU pairing](https://libimobiledevice.org/docs/libimobiledevice/1.4.0/lockdown_8h_a624871ea957a778920ecffe2d75d964f.html).
 
 | Metodo | Come funziona | Dove si inserisce il codice |
 | --- | --- | --- |
 | **iPhone / iPad** (iOS 27+) | GassPair si annuncia sulla rete locale come "computer" a cui associarsi; il dispositivo stesso si collega da Impostazioni. | Sul dispositivo, in Impostazioni (il codice arriva in notifica, nella Live Activity e negli appunti). |
 | **Apple TV** | GassPair si collega all'Apple TV che è sulla schermata di associazione. | In GassPair (il codice è mostrato sull'Apple TV). |
-| **Diagnostica LocalDevVPN** | Verifica Lockdown; opzionalmente tenta `Pair` dopo conferma esplicita. | Modalità sperimentale distinta da RPPairing e da CU/SRP. |
 
 Il file risultante si esporta con **Export Pairing File** ed è anche in **File › Sul mio iPhone › GassPair**:
 
 - `rp_pairing_file.plist` — iPhone/iPad
 - `appletv_rp_pairing_file.plist` — Apple TV
-
-## Diagnostica LocalDevVPN
-
-1. Connetti LocalDevVPN e attendi lo stato **Connected**. Collega l'iPhone a una rete Wi-Fi effettiva: il progetto LocalDevVPN ha un problema documentato in alcune condizioni di sola rete cellulare.
-2. In GassPair tocca **Test LocalDevVPN → Lockdown** e usa il valore **Device/Peer IP** configurato in LocalDevVPN, non il tunnel/interface IP.
-3. Inserisci un host, non una rete. Per esempio, `10.7.0.1` è un host; `10.7.0.1/32` è una notazione CIDR. GassPair riconosce e rimuove automaticamente `/32` o `/128`; una subnet come `/24` viene rifiutata invece di essere interpretata arbitrariamente come host.
-4. Esegui prima **TCP only**: se non raggiunge `ready`, nessun comando Lockdown viene inviato. Se TCP riesce, esegui **TCP + Lockdown**, che verifica `QueryType` e `GetValue(ProductVersion)`.
-5. Puoi condividere il rapporto diagnostico, che include la destinazione normalizzata, le transizioni di `NWConnection`, i byte ricevuti e la fase esatta del timeout.
-
-Un esito positivo della sola diagnostica conferma solo il percorso TCP e il protocollo plist. La modalità sperimentale invia `Request=Pair`, poi tenta `StartSession` TLS e salva un record Lockdown classico solo dopo esito positivo e verifica di rilettura. Non implementa CU/SRP e non garantisce che iOS 26.1 consenta il self-pairing. Il `SystemBUID` generato localmente non è quello di usbmuxd/macOS: compatibilità con il database pairing del Mac non è stabilita. GassPair non può ispezionare o correggere la route Network Extension di LocalDevVPN; se TCP non arriva a `ready`, prima va risolto il trasporto. Il progetto evita deliberatamente di presentare un file speculativo come successo.
 
 ## Uso
 
@@ -71,14 +64,13 @@ Carica tutta la cartella (ad es. con l'app iOS *Working Copy*). Il workflow `.gi
 ### Build locale (facoltativa, su Mac)
 
 ```sh
-./tools/test-localdevvpn-destination.sh  # host/CIDR parser tests; macOS or Linux with Swift
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 ./build-rust.sh      # Rust FFI -> GassPairFFI.xcframework
 xcodegen generate    # GassPair.xcodeproj
 open GassPair.xcodeproj
 ```
 
-Requisiti per la build iOS: Xcode 27, Rust, `xcodegen`. App minima: **iOS 16**. Il test del parser non richiede Xcode e controlla gli input IPv4/IPv6, CIDR, hostname e input malformati.
+Requisiti per compilare: Xcode 27, Rust, `xcodegen`. App minima: **iOS 16**.
 
 ## Architettura
 
@@ -91,27 +83,27 @@ Requisiti per la build iOS: Xcode 27, Rust, `xcodegen`. App minima: **iOS 16**. 
 MIT, **non commerciale**. Libero per uso personale/non commerciale; per uso commerciale contattare StephenDev0@outlook.com. Vedi [LICENSE](LICENSE).
 
 
-## LocalDevVPN TCP + Lockdown crash fix (2.2.1)
+## Versione 2.2.0 — import e controllo locale RPPairing
 
-Fixed a `Foundation.Data` index bug in the two-request diagnostic. `Data.removeFirst()` can advance `startIndex`; indexing its next response as `received[0]...received[3]` could trap when `QueryType` succeeded and `GetValue(ProductVersion)` started. The parser now uses indices relative to `startIndex`, rebases data after consuming a frame, and initializes fresh receive buffers for each request. A regression test covers sequential frames and fragmented headers/bodies.
+- Aggiunto import tramite il selettore file di iOS.
+- Convalida del formato plist, campi richiesti, dimensioni delle chiavi, UUID, lunghezza `alt_irk` e coerenza della coppia Ed25519.
+- Copia atomica del file importato, mantenendo separato il record importato dai pairing generati dall'app.
+- Messaggio esplicito che distingue validazione locale da verifica di rete `pair-verify`.
 
-Run `tools/test-lockdown-frame-index.sh` to execute the regression test on a machine with Swift installed. This fix addresses the crash path; it does not imply that classic self-pairing is supported by iOS.
-
-
-## Classic Lockdown Pair sperimentale (2.3.0)
-
-Dopo `Lockdown is reachable`, la sezione **Experimental classic Lockdown pairing** consente di confermare esplicitamente un tentativo reale `Request=Pair` sull'host configurato. Il backend Rust usa la libreria `idevice`, genera un `HostID` e un `SystemBUID` locali, gestisce gli errori restituiti da Lockdown, tenta `StartSession` TLS e scrive `classic_lockdown_pairing_file.plist` atomicamente solo dopo il successo della sessione e il read-back del plist. Il flusso è distinto dal Remote Pairing (RPPairing).
-
-Limiti: questa è una prova sperimentale e non è stata validata su un iPhone reale in questa build environment. Un `SystemBUID` locale non è quello del Mac/usbmuxd e non è garantito che il file sia importabile nel pairing store del Mac. La funzione non implementa il protocollo CU/SRP di `idevicepair -w`; iOS può rifiutare `Pair` su una connessione self-routed. Non verrà creato alcun file in caso di errore o mancata verifica TLS.
+Non è stato aggiunto un `pair-verify` arbitrario contro `10.7.0.1:62078`: quello è il servizio Lockdown classico, non un endpoint RPPairing. Per implementare la verifica remota effettiva bisogna usare l'endpoint/ruolo del servizio RPPairing esposto dal dispositivo e le API supportate dalla versione upstream di `idevice`.
 
 
-## Rust build fixes (2.3.1)
+## Versione 2.3.0 — operazioni RPPairing remote
 
-Corrected the Classic Lockdown Pair backend to match the pinned `idevice` API: `QueryType` is sent through `LockdownClient.idevice.get_type()`, and `start_session` is called with the single `PairingFile` parameter expected by the pinned revision. Added `uuid` as a direct Cargo dependency because the FFI backend calls `uuid::Uuid::new_v4()` for `HostID`, local `SystemBUID`, and temporary filenames.
+Aggiunti due endpoint FFI che usano il client `idevice::remote_pairing` contro un vero servizio RPPairing TCP:
 
-The Swift regression scripts pass in this environment. A full `cargo build` / Xcode build still must be run by CI or on a machine with the Rust iOS targets and Xcode installed; these source fixes should not be described as a successful device build until that run passes.
+- `gasspair_verify_rp_endpoint`: legge un `RpPairingFile` esistente, esegue `attempt_pair_verify` e `validate_pairing`, e restituisce successo solo se entrambi passano.
+- `gasspair_create_rp_endpoint`: esegue il protocollo RPPairing con PIN sul servizio indicato, apre una seconda connessione e verifica il record prima di salvarlo atomicamente.
 
+La UI accetta host, porta e PIN, permette di creare e verificare record e indica il percorso di output. L'host/porta devono identificare il servizio RPPairing effettivo (ad esempio il servizio pubblicizzato dal peer); `10.7.0.1:62078` è Lockdown classico e non funzionerà come endpoint RPPairing. LocalDevVPN può fornire routing verso un endpoint, ma non trasforma Lockdown in RPPairing e non bypassa l'autenticazione. Il flusso richiede che il peer remoto esponga RPPairing e mostri/accetti il PIN previsto dal protocollo.
 
-### Classic Lockdown Pair refusal (2.3.2)
+La creazione salva il file soltanto dopo un pair-verify riuscito. La verifica usa il file importato `rp_pairing_file_imported.plist`; la creazione salva `rp_pairing_file_remote_verified.plist`. Le chiavi private restano locali e non sono scritte nei log.
 
-When the device returns `GetProhibited` to `Request=Pair`, the backend now reports an explicit device-side refusal, does not retry, and does not write a pairing record. A successful TCP/Lockdown diagnostic does not override this refusal. Use the supported Remote Pairing flow for iPhone/iPad; CU/SRP via `idevicepair -w` is documented for Apple TV and is a different protocol.
+### Limiti di verifica della build
+
+I test statici e il parsing Swift sono eseguiti nel repository di sviluppo. La build Cargo per target iOS/Xcode e il test end-to-end contro un endpoint RPPairing reale devono ancora essere eseguiti in CI o su dispositivo; non vengono dichiarati riusciti da questa integrazione sorgente.

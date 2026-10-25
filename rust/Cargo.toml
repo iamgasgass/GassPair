@@ -1,6 +1,6 @@
 [package]
 name = "gasspair_ffi"
-version = "0.3.2"
+version = "0.3.1"
 edition = "2021"
 description = "GassPair: C FFI shim over idevice's on-device wireless pairing (iOS 27 pairable host + Apple TV)"
 
@@ -12,13 +12,10 @@ crate-type = ["staticlib"]
 idevice = { git = "https://github.com/jkcoxson/idevice.git", rev = "26a28f6a46b5d85a28043c2e62febfa394c8b0a6", default-features = false, features = [
   "remote_pairing",
   "aws-lc",
-  "pair",
-  "tcp",
 ] }
 
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "fs", "time", "sync", "io-util"] }
 socket2 = { version = "0.6", features = ["all"] }
-uuid = { version = "1.18", features = ["v4"] }
 
 [profile.release]
 opt-level = 3

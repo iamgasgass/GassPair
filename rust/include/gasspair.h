@@ -94,16 +94,17 @@ int32_t gasspair_pair_apple_tv(GassPairSession *session,
                                void *ctx,
                                GassPairResult *out);
 
-void gasspair_result_free(GassPairResult *r);
-// Experimental classic Lockdown Pair over a routed TCP host. Call only after
-// explicit user confirmation. Returns 0 on verified Pair + StartSession and
-// read-back validation; otherwise returns nonzero and puts a diagnostic in
-// out_message (caller must free it with gasspair_result_free? No: use free()).
-int32_t gasspair_classic_lockdown_pair(const char *host,
-                                       const char *out_path,
-                                       char **out_message);
-void gasspair_string_free(char *value);
+// Direct RPPairing endpoint operations. Host/port must be the actual RPPairing
+// service endpoint, NOT Lockdown TCP/62078. Creation writes only after real
+// pair-verify succeeds.
+int32_t gasspair_verify_rp_endpoint(const char *host, uint16_t port,
+                                    const char *client_name, const char *pairing_path,
+                                    GassPairResult *out);
+int32_t gasspair_create_rp_endpoint(const char *host, uint16_t port,
+                                    const char *client_name, const char *pin,
+                                    const char *out_path, GassPairResult *out);
 
+void gasspair_result_free(GassPairResult *r);
 const char *gasspair_version(void);
 
 #ifdef __cplusplus

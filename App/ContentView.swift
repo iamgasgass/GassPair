@@ -1,11 +1,21 @@
 import SwiftUI
 import UIKit
+import CryptoKit
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var controller = PairingController.shared
     @State private var appleTVPin = ""
-    @State private var showingLocalDevVPNProbe = false
     @FocusState private var pinFieldFocused: Bool
+    @State private var showingRPFileImporter = false
+    @State private var rpImportMessage: String?
+    @State private var rpImportSucceeded = false
+    @State private var rpEndpointHost = "10.7.0.1"
+    @State private var rpEndpointPort = "49152"
+    @State private var rpEndpointPIN = ""
+    @State private var rpRemoteBusy = false
+    @State private var rpRemoteMessage: String?
+    @State private var rpRemoteSucceeded = false
 
     var body: some View {
         ScrollView {
@@ -33,8 +43,10 @@ struct ContentView: View {
         }
         .animation(.default, value: controller.phase)
         .animation(.default, value: controller.statusLine)
-        .sheet(isPresented: $showingLocalDevVPNProbe) {
-            NavigationView { LocalDevVPNProbeView() }
+        .fileImporter(isPresented: $showingRPFileImporter,
+                      allowedContentTypes: [.propertyList, .xml, .data],
+                      allowsMultipleSelection: false) { result in
+            importAndValidateRPFile(result)
         }
     }
 
@@ -70,16 +82,70 @@ struct ContentView: View {
                 .pillButton()
                 .controlSize(.large)
 
-                Button { showingLocalDevVPNProbe = true } label: {
-                    Label("Test LocalDevVPN → Lockdown", systemImage: "network")
+                if !PairingController.thisDeviceCanSelfPair {
+                    selfPairNotice
+                }
+
+                Button {
+                    showingRPFileImporter = true
+                } label: {
+                    Label("Import / Validate RP Pairing File", systemImage: "doc.badge.gearshape")
+                        .font(.headline)
                         .frame(maxWidth: .infinity)
                 }
                 .pillButton()
                 .controlSize(.large)
 
-                if !PairingController.thisDeviceCanSelfPair {
-                    selfPairNotice
+                if let rpImportMessage {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(rpImportSucceeded ? "RP file validated locally" : "RP file not accepted",
+                              systemImage: rpImportSucceeded ? "checkmark.shield" : "exclamationmark.triangle")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(rpImportSucceeded ? .green : .orange)
+                        Text(rpImportMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .glassCard(cornerRadius: 16)
                 }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Remote RPPairing endpoint")
+                        .font(.headline)
+                    Text("Enter the actual RPPairing service address advertised by the target. LocalDevVPN's Lockdown port 62078 is not an RPPairing endpoint.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    TextField("Host / IP", text: $rpEndpointHost)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .textFieldStyle(.roundedBorder)
+                    TextField("RPPairing port", text: $rpEndpointPort)
+                        .keyboardType(.numberPad).textFieldStyle(.roundedBorder)
+                    SecureField("6-digit pairing PIN", text: $rpEndpointPIN)
+                        .keyboardType(.numberPad).textFieldStyle(.roundedBorder)
+                        .onChange(of: rpEndpointPIN) { value in
+                            rpEndpointPIN = String(value.filter(\.isNumber).prefix(6))
+                        }
+                    Button {
+                        createRemoteRPPairing()
+                    } label: {
+                        if rpRemoteBusy { ProgressView().frame(maxWidth: .infinity) }
+                        else { Label("Create + pair-verify + save", systemImage: "key.horizontal").frame(maxWidth: .infinity) }
+                    }
+                    .pillButton().disabled(rpRemoteBusy || rpEndpointHost.trimmingCharacters(in: .whitespaces).isEmpty || Int(rpEndpointPort) == nil || rpEndpointPIN.count != 6)
+                    Button {
+                        verifyImportedRPPairing()
+                    } label: {
+                        Label("Verify imported record against endpoint", systemImage: "checkmark.shield").frame(maxWidth: .infinity)
+                    }
+                    .pillButton().disabled(rpRemoteBusy || rpEndpointHost.trimmingCharacters(in: .whitespaces).isEmpty || Int(rpEndpointPort) == nil)
+                    if let rpRemoteMessage {
+                        Text(rpRemoteMessage).font(.caption).textSelection(.enabled)
+                            .foregroundStyle(rpRemoteSucceeded ? .green : .orange)
+                    }
+                }
+                .padding().glassCard(cornerRadius: 16)
 
                 if let last = controller.lastPairing {
                     lastPairingCard(last)
@@ -282,6 +348,118 @@ struct ContentView: View {
                     .controlSize(.large)
                     .padding(.top, 4)
             }
+        }
+    }
+
+    private func createRemoteRPPairing() {
+        guard let port = UInt16(rpEndpointPort), rpEndpointPIN.count == 6 else { return }
+        rpRemoteBusy = true; rpRemoteMessage = "Connecting to the RPPairing service…"; rpRemoteSucceeded = false
+        let host = rpEndpointHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pin = rpEndpointPIN
+        let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("rp_pairing_file_remote_verified.plist").path
+        DispatchQueue.global(qos: .userInitiated).async {
+            var result = GassPairResult()
+            let rc = host.withCString { h in
+                "GassPair".withCString { n in pin.withCString { p in output.withCString { o in
+                    gasspair_create_rp_endpoint(h, port, n, p, o, &result)
+                } } }
+            }
+            let message: String
+            if rc == 0 {
+                message = "Pair-setup and pair-verify succeeded. Verified RPPairing record saved to Documents/rp_pairing_file_remote_verified.plist."
+            } else if let error = result.error {
+                message = String(cString: error)
+            } else {
+                message = "RPPairing creation failed (code \(rc))."
+            }
+            DispatchQueue.main.async {
+                rpRemoteBusy = false; rpRemoteSucceeded = rc == 0; rpRemoteMessage = message
+                if rc == 0 { rpEndpointPIN = "" }
+            }
+            gasspair_result_free(&result)
+        }
+    }
+
+    private func verifyImportedRPPairing() {
+        guard let port = UInt16(rpEndpointPort) else { return }
+        let file = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("rp_pairing_file_imported.plist").path
+        guard FileManager.default.fileExists(atPath: file) else {
+            rpRemoteSucceeded = false; rpRemoteMessage = "Import an RPPairing file first."; return
+        }
+        rpRemoteBusy = true; rpRemoteMessage = "Performing real pair-verify…"; rpRemoteSucceeded = false
+        let host = rpEndpointHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        DispatchQueue.global(qos: .userInitiated).async {
+            var result = GassPairResult()
+            let rc = host.withCString { h in "GassPair".withCString { n in file.withCString { f in
+                gasspair_verify_rp_endpoint(h, port, n, f, &result)
+            } } }
+            let message: String
+            if rc == 0 { message = "Remote pair-verify succeeded." }
+            else if let error = result.error { message = String(cString: error) }
+            else { message = "Remote pair-verify failed (code \\(rc))." }
+            DispatchQueue.main.async { rpRemoteBusy = false; rpRemoteSucceeded = rc == 0; rpRemoteMessage = message }
+            gasspair_result_free(&result)
+        }
+    }
+
+    /// Imports an existing RPPairing plist without inventing credentials.
+    /// This is a local structural/key-consistency check, NOT network pair-verify.
+    private func importAndValidateRPFile(_ result: Result<[URL], Error>) {
+        do {
+            guard let source = try result.get().first else { return }
+            let scoped = source.startAccessingSecurityScopedResource()
+            defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+            let data = try Data(contentsOf: source, options: [.mappedIfSafe])
+            guard data.count <= 1_048_576 else {
+                throw RPImportError.invalid("The selected file is larger than 1 MiB.")
+            }
+            guard let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
+                throw RPImportError.invalid("The file is not a property-list dictionary.")
+            }
+            guard let publicKey = plist["public_key"] as? Data,
+                  let privateKey = plist["private_key"] as? Data,
+                  let identifier = plist["identifier"] as? String,
+                  let altIRK = plist["alt_irk"] as? Data else {
+                throw RPImportError.invalid("Required fields are missing: public_key, private_key, identifier, alt_irk.")
+            }
+            guard publicKey.count == 32, privateKey.count == 32 else {
+                throw RPImportError.invalid("public_key and private_key must each contain 32 bytes.")
+            }
+            guard altIRK.count == 16 else {
+                throw RPImportError.invalid("alt_irk must contain 16 bytes.")
+            }
+            guard UUID(uuidString: identifier) != nil else {
+                throw RPImportError.invalid("identifier is not a valid UUID.")
+            }
+            let privateKeyObject = try Curve25519.Signing.PrivateKey(rawRepresentation: privateKey)
+            guard privateKeyObject.publicKey.rawRepresentation == publicKey else {
+                throw RPImportError.invalid("public_key does not match the public key derived from private_key.")
+            }
+
+            let destination = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("rp_pairing_file_imported.plist")
+            let temporary = destination.appendingPathExtension("tmp")
+            try data.write(to: temporary, options: [.atomic])
+            if FileManager.default.fileExists(atPath: destination.path) {
+                _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+            } else {
+                try FileManager.default.moveItem(at: temporary, to: destination)
+            }
+            rpImportSucceeded = true
+            rpImportMessage = "The plist structure, key lengths, UUID, 16-byte alt_irk, and Ed25519 public/private key consistency passed. Imported as rp_pairing_file_imported.plist. This does not prove the remote peer accepts it: network pair-verify must be run against the actual RPPairing service endpoint."
+        } catch {
+            rpImportSucceeded = false
+            rpImportMessage = error.localizedDescription
+        }
+    }
+
+    private enum RPImportError: LocalizedError {
+        case invalid(String)
+        var errorDescription: String? {
+            if case .invalid(let message) = self { return message }
+            return "Invalid RPPairing file."
         }
     }
 
