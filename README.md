@@ -107,3 +107,8 @@ La creazione salva il file soltanto dopo un pair-verify riuscito. La verifica us
 ### Limiti di verifica della build
 
 I test statici e il parsing Swift sono eseguiti nel repository di sviluppo. La build Cargo per target iOS/Xcode e il test end-to-end contro un endpoint RPPairing reale devono ancora essere eseguiti in CI o su dispositivo; non vengono dichiarati riusciti da questa integrazione sorgente.
+
+
+## Build fix 2.3.1 — Swift C-FFI import
+
+The remote RPPairing actions in `ContentView.swift` call `GassPairResult`, `gasspair_create_rp_endpoint`, `gasspair_verify_rp_endpoint`, and `gasspair_result_free`. These declarations are supplied by the generated `GassPairFFI` Clang module (from `rust/include/gasspair.h` and the `GassPairFFI.xcframework` built by `build-rust.sh`). Swift imports are file-scoped, so importing `GassPairFFI` in `PairingController.swift` does not expose its declarations in `ContentView.swift`. Version 2.3.1 imports the module directly in `ContentView.swift` and adds a regression check for this integration.

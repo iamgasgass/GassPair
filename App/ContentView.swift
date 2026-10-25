@@ -1,4 +1,5 @@
 import SwiftUI
+import GassPairFFI
 import UIKit
 import CryptoKit
 import UniformTypeIdentifiers

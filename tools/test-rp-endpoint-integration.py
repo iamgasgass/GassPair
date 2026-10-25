@@ -7,6 +7,9 @@ header = (root / "rust/include/gasspair.h").read_text()
 swift = (root / "App/ContentView.swift").read_text()
 readme = (root / "README.md").read_text()
 checks = {
+    "Swift imports generated C FFI module in ContentView": "import GassPairFFI" in swift,
+    "Rust FFI result struct is exported in C header": "} GassPairResult;" in header,
+    "Rust FFI result free function is exported in C header": "gasspair_result_free(GassPairResult *r)" in header,
     "FFI create endpoint": "gasspair_create_rp_endpoint" in rust and "gasspair_create_rp_endpoint" in header,
     "FFI verify endpoint": "gasspair_verify_rp_endpoint" in rust and "gasspair_verify_rp_endpoint" in header,
     "actual pair-verify handshake": "attempt_pair_verify().await" in rust,
