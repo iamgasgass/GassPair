@@ -94,6 +94,16 @@ int32_t gasspair_pair_apple_tv(GassPairSession *session,
                                void *ctx,
                                GassPairResult *out);
 
+// Create a real RPPairing record through the Lockdown-authenticated
+// com.apple.dt.remotepairingdeviced.lockdown service. `port` is normally 62078;
+// `lockdown_path` must be an existing, valid Lockdown pairing record for this
+// device. Returns success only after a new record passes pair-verify.
+int32_t gasspair_create_rp_from_lockdown_endpoint(const char *host, uint16_t port,
+                                                   const char *client_name,
+                                                   const char *lockdown_path,
+                                                   const char *out_path,
+                                                   GassPairResult *out);
+
 // Direct RPPairing endpoint operations. Host/port must be the actual RPPairing
 // service endpoint, NOT Lockdown TCP/62078. Creation writes only after real
 // pair-verify succeeds.

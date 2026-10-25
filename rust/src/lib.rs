@@ -44,6 +44,11 @@ use idevice::remote_pairing::{
     RpPairingFile, RpPairingSocket,
 };
 use idevice::IdeviceError;
+use idevice::IdeviceService;
+use idevice::pairing_file::PairingFile;
+use idevice::provider::TcpProvider;
+use idevice::remote_pairing::RemotePairingLockdownService;
+use std::net::IpAddr;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 use tokio::task::JoinSet;
@@ -539,6 +544,95 @@ pub unsafe extern "C" fn gasspair_verify_rp_endpoint(
         Ok(Ok(message)) => { (*out).verified = 1; (*out).device_name = raw_cstr(&message); GASSPAIR_OK }
         Ok(Err(e)) => { (*out).error = raw_cstr(&e); GASSPAIR_ERR }
         Err(_) => { (*out).error = raw_cstr("Internal panic while verifying RPPairing endpoint."); GASSPAIR_ERR }
+    }
+}
+
+/// Create a new RPPairing record using an existing, user-imported Lockdown
+/// trust record over a TCP-reachable Lockdown endpoint (e.g. LocalDevVPN).
+/// This follows idevice_pair's RemotePairingLockdownService path, not raw TCP
+/// to an RPPairing port. The imported Lockdown record is used only to start the
+/// authenticated Lockdown session; the new RPPairing record is created by the
+/// device's remotepairingdeviced service and is verified before being saved.
+#[no_mangle]
+pub unsafe extern "C" fn gasspair_create_rp_from_lockdown_endpoint(
+    host: *const c_char,
+    port: u16,
+    client_name: *const c_char,
+    lockdown_path: *const c_char,
+    out_path: *const c_char,
+    out: *mut GassPairResult,
+) -> i32 {
+    if out.is_null() || port == 0 { return GASSPAIR_ERR_INVALID_ARG; }
+    *out = GassPairResult::empty();
+    let host = opt_str(host, "");
+    let name = opt_str(client_name, "GassPair");
+    let lockdown_path = opt_str(lockdown_path, "");
+    let out_path = opt_str(out_path, "rp_pairing_file_from_lockdown.plist");
+    if host.is_empty() || lockdown_path.is_empty() || out_path.is_empty() {
+        (*out).error = raw_cstr("Host, imported Lockdown pairing file, and output path are required.");
+        return GASSPAIR_ERR_INVALID_ARG;
+    }
+    let ip: IpAddr = match host.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            (*out).error = raw_cstr("Host must be an IP address reachable through LocalDevVPN.");
+            return GASSPAIR_ERR_INVALID_ARG;
+        }
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()
+            .map_err(|e| format!("runtime: {e}"))?;
+        rt.block_on(async {
+            let bytes = tokio::fs::read(&lockdown_path).await
+                .map_err(|e| format!("read imported Lockdown plist: {e}"))?;
+            let lockdown_file = PairingFile::from_bytes(&bytes)
+                .map_err(|e| format!("invalid Lockdown pairing file: {e}"))?;
+            let provider = TcpProvider {
+                addr: ip,
+                scope_id: None,
+                pairing_file: lockdown_file,
+                label: name.clone(),
+            };
+            let mut file = RpPairingFile::generate(&name);
+            // First call creates/stores a remote pairing using the existing
+            // Lockdown trust. The second call follows the upstream pattern to
+            // reconnect and verify that the device retained the new identity.
+            for stage in ["create", "confirm"] {
+                tokio::time::timeout(Duration::from_secs(75), async {
+                    let service = RemotePairingLockdownService::connect(&provider).await
+                        .map_err(|e| format!("Lockdown-authenticated RemotePairing service ({stage}) failed: {e}"))?;
+                    let mut client = service.into_client(&name)
+                        .map_err(|e| format!("create RPPairing client ({stage}): {e}"))?;
+                    client.connect(&mut file, || async { "000000".to_string() }).await
+                        .map_err(|e| format!("RPPairing {stage} failed: {e}"))?;
+                    Ok::<(), String>(())
+                }).await.map_err(|_| format!("RPPairing {stage} timed out"))??;
+            }
+            // Strict verification: this pass may NOT fall back to pair-setup.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                let service = RemotePairingLockdownService::connect(&provider).await
+                    .map_err(|e| format!("open verification service: {e}"))?;
+                let mut verifier = service.into_client(&name)
+                    .map_err(|e| format!("create verification client: {e}"))?;
+                verifier.attempt_pair_verify().await
+                    .map_err(|e| format!("new RPPairing pair-verify handshake failed: {e}"))?;
+                verifier.validate_pairing(&mut file).await
+                    .map_err(|e| format!("new RPPairing pair-verify validation failed: {e}"))?;
+                Ok::<(), String>(())
+            }).await.map_err(|_| "RPPairing pair-verify timed out".to_string())??;
+            save_pairing_file(&file, &out_path).await?;
+            Ok::<(String, String), String>((file.identifier.clone(), out_path.clone()))
+        })
+    }));
+    match result {
+        Ok(Ok((identifier, path))) => {
+            (*out).verified = 1;
+            (*out).device_name = raw_cstr(&format!("RPPairing created and pair-verify succeeded. Identifier: {identifier}"));
+            (*out).pairing_file_path = raw_cstr(&path);
+            GASSPAIR_OK
+        }
+        Ok(Err(e)) => { (*out).error = raw_cstr(&e); GASSPAIR_ERR }
+        Err(_) => { (*out).error = raw_cstr("Internal panic while creating RPPairing from Lockdown trust."); GASSPAIR_ERR }
     }
 }
 

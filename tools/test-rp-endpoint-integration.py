@@ -15,7 +15,8 @@ checks = {
     "actual pair-verify handshake": "attempt_pair_verify().await" in rust,
     "actual pairing validation": "validate_pairing(&mut file).await" in rust,
     "create verifies before saving": rust.index("validate_pairing(&mut file).await", rust.index("gasspair_create_rp_endpoint")) < rust.index("save_pairing_file(&file, &path).await", rust.index("gasspair_create_rp_endpoint")),
-    "remote endpoint UI": "Remote RPPairing endpoint" in swift and "Create + pair-verify + save" in swift,
+    "remote endpoint UI": "Remote RPPairing endpoint" in swift and "Create new + pair-verify + save" in swift,
+    "imported record uses no-PIN pair-verify flow": "Verify imported + pair-verify + save" in swift and "verifyImportedRPPairingAndSave()" in swift,
     "Lockdown port explicitly disclaimed": "62078" in readme and "endpoint RPPairing" in readme,
     "import verification uses real endpoint": "gasspair_verify_rp_endpoint" in swift,
 }

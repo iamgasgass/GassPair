@@ -112,3 +112,20 @@ I test statici e il parsing Swift sono eseguiti nel repository di sviluppo. La b
 ## Build fix 2.3.1 — Swift C-FFI import
 
 The remote RPPairing actions in `ContentView.swift` call `GassPairResult`, `gasspair_create_rp_endpoint`, `gasspair_verify_rp_endpoint`, and `gasspair_result_free`. These declarations are supplied by the generated `GassPairFFI` Clang module (from `rust/include/gasspair.h` and the `GassPairFFI.xcframework` built by `build-rust.sh`). Swift imports are file-scoped, so importing `GassPairFFI` in `PairingController.swift` does not expose its declarations in `ContentView.swift`. Version 2.3.1 imports the module directly in `ContentView.swift` and adds a regression check for this integration.
+
+
+## Importazione RPPairing senza chiedere il PIN (2.3.2)
+
+Quando importi un plist RPPairing valido, GassPair passa automaticamente alla modalità **Verify imported + pair-verify + save** e nasconde il campo PIN. Il PIN di sei cifre non è contenuto nel pairing plist: il file persiste `public_key`, `private_key`, `identifier` e `alt_irk`; il PIN è un codice temporaneo di pair-setup. Per un record già esistente, l'app esegue `pair-verify` contro l'endpoint configurato senza iniziare un nuovo pair-setup e, solo dopo l'esito remoto positivo, copia atomicamente il file in `rp_pairing_file_imported_verified.plist`, rilegge il file e ne confronta i byte. Il file importato originale non viene modificato.
+
+Se non hai importato un record, GassPair mostra invece il campo PIN e il flusso **Create new + pair-verify + save**: la nuova creazione richiede il codice temporaneo fornito dal servizio remoto, non può ricavarlo da un altro plist. Usa solo l'endpoint RPPairing effettivo; la porta Lockdown `62078` non è il servizio RPPairing.
+
+
+## Create RPPairing from an imported Lockdown trust record (2.3.3)
+
+The app now accepts an existing `Lockdown.plist` and uses it as the authenticated trust record for a TCP-reachable Lockdown endpoint (default port 62078, for example via LocalDevVPN). The Rust backend uses `TcpProvider` and `RemotePairingLockdownService` from the pinned `idevice` crate, creates an `RpPairingFile` through the actual device service, reconnects and verifies the resulting record with `attempt_pair_verify` and `validate_pairing`, and only then atomically saves `rp_pairing_file_from_lockdown.plist`. This does not call classic `Request=Pair` and does not synthesize an RPPairing record. The endpoint must be the intended device and the imported Lockdown record must be valid for it. The iOS app cannot provide usbmuxd itself; this path uses the Lockdown TCP endpoint authenticated by the imported record. Full Xcode/iOS-device verification remains necessary.
+
+
+### Import Lockdown trust and create a new RPPairing record (2.3.3)
+
+Use the separate **Create RPPairing from trusted Lockdown record** panel. Import a genuine `Lockdown.plist` for the target, set the target IP reachable through LocalDevVPN, and run the action. The backend parses the Lockdown pairing file, creates an `idevice::provider::TcpProvider`, opens `com.apple.dt.remotepairingdeviced.lockdown` via `RemotePairingLockdownService`, uses the existing Lockdown trust to perform the real RPPairing operation, reconnects, and requires strict `attempt_pair_verify` + `validate_pairing` before writing `rp_pairing_file_from_lockdown.plist`. The operation does not use the classic Lockdown `Pair` request and never fabricates an RPPairing record. The imported Lockdown file is sensitive and is stored with complete file protection. This path is based on the upstream `idevice_pair` `remote_file` flow and has static integration tests; actual operation still requires a compatible reachable service and a successful iOS build/device test.
