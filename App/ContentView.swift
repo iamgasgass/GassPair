@@ -10,6 +10,7 @@ struct ContentView: View {
     @FocusState private var pinFieldFocused: Bool
     @State private var showingRPFileImporter = false
     @State private var showingLockdownFileImporter = false
+    @State private var showingMacUSBMuxdCompanion = false
     @State private var lockdownImportMessage: String?
     @State private var lockdownImportSucceeded = false
     @State private var lockdownPairingLoaded = false
@@ -59,6 +60,11 @@ struct ContentView: View {
                       allowedContentTypes: [.propertyList, .xml, .data],
                       allowsMultipleSelection: false) { result in
             importLockdownPairingFile(result)
+        }
+        .sheet(isPresented: $showingMacUSBMuxdCompanion) {
+            NavigationStack {
+                MacUsbmuxdCompanionView(initialLockdownFileURL: lockdownPairingLoaded ? importedLockdownFileURL : nil)
+            }
         }
         .onAppear {
             refreshStoredRPImportState()
@@ -130,7 +136,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Create RPPairing from trusted Lockdown record")
                         .font(.headline)
-                    Text("Import the existing Lockdown.plist for this device, then connect through LocalDevVPN to Lockdown (normally 62078). GassPair will authenticate with that record, request the actual RemotePairingLockdownService, create a new RPPairing record, and require a successful pair-verify before saving.")
+                    Text("RemotePairingLockdownService must be opened through a usbmuxd device provider. LocalDevVPN alone is raw IP routing, so GassPair does not open the service's dynamic socket directly. Use the authenticated, certificate-pinned macOS companion to run the native provider flow and return only a record that passed fresh pair-verify.")
                         .font(.caption).foregroundStyle(.secondary)
                     Button {
                         showingLockdownFileImporter = true
@@ -139,19 +145,14 @@ struct ContentView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .pillButton()
-                    TextField("Device IP via LocalDevVPN", text: $rpEndpointHost)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .textFieldStyle(.roundedBorder)
-                    Text("Lockdown port: 62078")
-                        .font(.caption).foregroundStyle(.secondary)
                     Button {
-                        createRPPairingFromLockdownTrust()
+                        showingMacUSBMuxdCompanion = true
                     } label: {
-                        if rpRemoteBusy { ProgressView().frame(maxWidth: .infinity) }
-                        else { Label("Create RPPairing from Lockdown trust + verify + save", systemImage: "key.horizontal").frame(maxWidth: .infinity) }
+                        Label("Open macOS usbmuxd companion", systemImage: "network.badge.shield.half.filled")
+                            .frame(maxWidth: .infinity)
                     }
                     .pillButton()
-                    .disabled(rpRemoteBusy || !lockdownPairingLoaded || rpEndpointHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(rpRemoteBusy)
                     if let lockdownImportMessage {
                         Text(lockdownImportMessage).font(.caption).textSelection(.enabled)
                             .foregroundStyle(lockdownImportSucceeded ? .green : .orange)
@@ -507,7 +508,7 @@ struct ContentView: View {
             try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: importedLockdownFileURL.path)
             lockdownPairingLoaded = true
             lockdownImportSucceeded = true
-            lockdownImportMessage = "Lockdown pairing record imported locally. Remote trust and RPPairing creation have not yet been verified; press the create button to test the real device."
+            lockdownImportMessage = "Lockdown pairing record imported locally. Remote trust has not yet been verified. Open the macOS usbmuxd companion to validate the imported record against the selected device and create RPPairing."
         } catch {
             lockdownPairingLoaded = false
             lockdownImportSucceeded = false
@@ -515,37 +516,6 @@ struct ContentView: View {
         }
     }
 
-    private func createRPPairingFromLockdownTrust() {
-        guard lockdownPairingLoaded else { return }
-        let host = rpEndpointHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        let input = importedLockdownFileURL.path
-        let outputURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("rp_pairing_file_from_lockdown.plist")
-        rpRemoteBusy = true
-        rpRemoteSucceeded = false
-        rpRemoteMessage = "Authenticating Lockdown session, opening RemotePairingLockdownService, creating RPPairing and verifying the new record…"
-        DispatchQueue.global(qos: .userInitiated).async {
-            var result = GassPairResult()
-            let rc = host.withCString { h in "GassPair".withCString { n in input.withCString { i in outputURL.path.withCString { o in
-                gasspair_create_rp_from_lockdown_endpoint(h, 62078, n, i, o, &result)
-            } } } }
-            let message: String
-            if rc == 0 {
-                let detail = result.device_name.map { String(cString: $0) } ?? "RPPairing created and verified."
-                message = "\(detail) Saved to Documents/rp_pairing_file_from_lockdown.plist."
-            } else if let error = result.error {
-                message = String(cString: error)
-            } else {
-                message = "RPPairing creation failed (code \(rc)); no success is claimed."
-            }
-            gasspair_result_free(&result)
-            DispatchQueue.main.async {
-                rpRemoteBusy = false
-                rpRemoteSucceeded = rc == 0
-                rpRemoteMessage = message
-            }
-        }
-    }
 
     /// An existing RPPairing record does not contain the transient pair-setup PIN.
     /// Verify the imported identity against the real endpoint, and publish a separate

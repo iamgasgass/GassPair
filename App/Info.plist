@@ -36,7 +36,7 @@
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>GassPair uses your local network to pair this iPhone or iPad with itself and to find Apple TVs, entirely on-device.</string>
+    <string>GassPair uses your local network to pair compatible devices, discover Apple TVs, and connect securely to an optional macOS usbmuxd companion.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_remotepairing-pairable-host._tcp</string>

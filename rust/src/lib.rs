@@ -45,8 +45,9 @@ use idevice::remote_pairing::{
 };
 use idevice::IdeviceError;
 use idevice::IdeviceService;
+use idevice::lockdown::LockdownClient;
 use idevice::pairing_file::PairingFile;
-use idevice::provider::TcpProvider;
+use idevice::provider::{IdeviceProvider, TcpProvider};
 use idevice::remote_pairing::RemotePairingLockdownService;
 use std::net::IpAddr;
 use tokio::net::{TcpListener, TcpStream};
@@ -81,6 +82,18 @@ pub const GASSPAIR_STATUS_VERIFYING: i32 = 12;
 pub const GASSPAIR_STATUS_VERIFY_FAILED: i32 = 13;
 /// Both flows: pairing succeeded, writing the pairing file.
 pub const GASSPAIR_STATUS_SAVING: i32 = 20;
+
+// Lockdown-trust -> RPPairing progress. These are surfaced in the same UI card
+// as the action so users can distinguish a stalled service-open from pairing.
+pub const GASSPAIR_STATUS_RP_TRUST_LOADING: i32 = 40;
+pub const GASSPAIR_STATUS_RP_LOCKDOWN_SESSION: i32 = 41;
+pub const GASSPAIR_STATUS_RP_SERVICE_OPEN: i32 = 42;
+pub const GASSPAIR_STATUS_RP_PAIRING: i32 = 43;
+pub const GASSPAIR_STATUS_RP_CONFIRMING: i32 = 44;
+pub const GASSPAIR_STATUS_RP_VERIFYING: i32 = 45;
+pub const GASSPAIR_STATUS_RP_SAVING: i32 = 46;
+pub const GASSPAIR_STATUS_RP_COMPLETE: i32 = 47;
+pub const GASSPAIR_STATUS_RP_FAILED: i32 = 48;
 
 const HOST_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(300);
 const ATV_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
@@ -235,6 +248,18 @@ fn to_cstring(s: &str) -> CString {
 fn raw_cstr(s: &str) -> *mut c_char {
     to_cstring(s).into_raw()
 }
+
+fn report_rp_progress(callback: GassPairStatusCb, ctx: *mut c_void, code: i32, message: &str) {
+    if let Some(callback) = callback {
+        // C strings cannot contain NUL. Keep reporting best-effort and never panic
+        // across the FFI boundary due to a malformed diagnostic string.
+        let safe = message.replace('\0', " ");
+        if let Ok(text) = CString::new(safe) {
+            callback(ctx, code, text.as_ptr());
+        }
+    }
+}
+
 
 unsafe fn opt_str(p: *const c_char, default: &str) -> String {
     if p.is_null() {
@@ -547,6 +572,137 @@ pub unsafe extern "C" fn gasspair_verify_rp_endpoint(
     }
 }
 
+/// Opens remotepairingdeviced.lockdown with stage-specific diagnostics over the
+/// TCP provider. The public `IdeviceService::connect` helper hides each step and
+/// collapses failures into errors like "device socket io failed"; doing the
+/// steps explicitly tells us whether Lockdown auth, StartService, the dynamic
+/// service socket, or RPPairing protocol I/O is the failing boundary.
+async fn open_rp_lockdown_service_over_tcp(
+    provider: &TcpProvider,
+    client_name: &str,
+    stage: &str,
+    status_cb: GassPairStatusCb,
+    ctx: *mut c_void,
+) -> Result<RemotePairingLockdownService, String> {
+    report_rp_progress(
+        status_cb,
+        ctx,
+        GASSPAIR_STATUS_RP_LOCKDOWN_SESSION,
+        &format!("{stage}: connecting to Lockdown TCP on the configured endpoint…"),
+    );
+    let mut lockdown = tokio::time::timeout(
+        Duration::from_secs(10),
+        LockdownClient::connect(provider),
+    )
+    .await
+    .map_err(|_| format!("{stage}: connecting to Lockdown TCP/62078 timed out after 10 seconds"))?
+    .map_err(|e| explain_rp_transport_error(&format!("{stage}: Lockdown TCP connection failed"), e))?;
+
+    let pairing_file = provider
+        .get_pairing_file()
+        .await
+        .map_err(|e| format!("{stage}: could not load imported Lockdown trust record: {e}"))?;
+    report_rp_progress(
+        status_cb,
+        ctx,
+        GASSPAIR_STATUS_RP_LOCKDOWN_SESSION,
+        &format!("{stage}: Lockdown socket opened; authenticating with imported HostID/SystemBUID via StartSession TLS…"),
+    );
+    let legacy = tokio::time::timeout(
+        Duration::from_secs(15),
+        lockdown.start_session(&pairing_file),
+    )
+    .await
+    .map_err(|_| format!("{stage}: Lockdown StartSession TLS timed out after 15 seconds"))?
+    .map_err(|e| explain_rp_transport_error(&format!("{stage}: Lockdown StartSession TLS failed"), e))?;
+
+    let version = lockdown
+        .get_value(Some("ProductVersion"), None)
+        .await
+        .ok()
+        .and_then(|v| v.as_string().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_string());
+    let service_name = RemotePairingLockdownService::service_name().into_owned();
+    report_rp_progress(
+        status_cb,
+        ctx,
+        GASSPAIR_STATUS_RP_SERVICE_OPEN,
+        &format!("{stage}: authenticated Lockdown session established (iOS {version}); requesting StartService for {service_name}…"),
+    );
+    let (service_port, ssl) = tokio::time::timeout(
+        Duration::from_secs(12),
+        lockdown.start_service(service_name.clone()),
+    )
+    .await
+    .map_err(|_| format!("{stage}: Lockdown StartService({service_name}) timed out after 12 seconds"))?
+    .map_err(|e| explain_rp_transport_error(&format!("{stage}: Lockdown refused StartService({service_name})"), e))?;
+
+    report_rp_progress(
+        status_cb,
+        ctx,
+        GASSPAIR_STATUS_RP_SERVICE_OPEN,
+        &format!("{stage}: Lockdown returned service port {service_port} (EnableServiceSSL={ssl}). Now opening that service socket directly through LocalDevVPN; this is distinct from TCP/62078…"),
+    );
+    let mut service_socket = tokio::time::timeout(
+        Duration::from_secs(10),
+        provider.connect(service_port),
+    )
+    .await
+    .map_err(|_| format!("{stage}: service {service_name} port {service_port} was not reachable over LocalDevVPN within 10 seconds. Lockdown TCP/62078 may work while this second port is not routed."))?
+    .map_err(|e| explain_rp_transport_error(&format!("{stage}: TCP connection to Lockdown-assigned service port {service_port} failed"), e))?;
+
+    if ssl {
+        report_rp_progress(
+            status_cb,
+            ctx,
+            GASSPAIR_STATUS_RP_SERVICE_OPEN,
+            &format!("{stage}: the service requires TLS; establishing the service TLS session using the imported Lockdown record…"),
+        );
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            service_socket.start_session(&pairing_file, legacy),
+        )
+        .await
+        .map_err(|_| format!("{stage}: TLS setup on service port {service_port} timed out after 15 seconds"))?
+        .map_err(|e| explain_rp_transport_error(&format!("{stage}: TLS setup on service port {service_port} failed"), e))?;
+    }
+
+    report_rp_progress(
+        status_cb,
+        ctx,
+        GASSPAIR_STATUS_RP_SERVICE_OPEN,
+        &format!("{stage}: service port {service_port} is connected; constructing the RPPairing protocol client…"),
+    );
+    RemotePairingLockdownService::from_stream(service_socket)
+        .await
+        .map_err(|e| explain_rp_transport_error(&format!("{stage}: converting the service socket to RemotePairingLockdownService failed"), e))
+}
+
+fn explain_rp_transport_error(stage: &str, error: impl std::fmt::Display) -> String {
+    let detail = error.to_string();
+    let lower = detail.to_ascii_lowercase();
+    let is_device_socket_io = lower.contains("device socket io failed")
+        || lower.contains("device socket i/o failed")
+        || lower.contains("devicesocketio");
+    if !is_device_socket_io {
+        return format!("{stage}: {detail}");
+    }
+
+    if stage.contains("RPPairing") || stage.contains("RemotePairingLockdownService") {
+        format!(
+            "{stage}: device socket I/O failed ({detail}). The authenticated RemotePairingLockdownService socket was opened, but its RPPairing wire exchange failed. Upstream idevice_pair accesses this private service through usbmuxd; a raw TcpProvider over LocalDevVPN is not usbmuxd multiplexing. This is a transport-boundary failure, not a PIN guess to retry. No RPPairing file is saved unless the full protocol and pair-verify complete."
+        )
+    } else if stage.contains("service port") || stage.contains("StartService") || stage.contains("service TLS") {
+        format!(
+            "{stage}: device socket I/O failed ({detail}). Lockdown TCP/62078 may be reachable while the separate device-assigned RemotePairingLockdownService socket is not usable through raw TCP. Upstream idevice_pair opens this private service through usbmuxd; LocalDevVPN routes IP packets but does not implement usbmuxd multiplexing. No RPPairing file was saved."
+        )
+    } else {
+        format!(
+            "{stage}: device socket I/O failed ({detail}). The failure occurred in the Lockdown control/authentication phase, before the RPPairing wire exchange. Check that the imported Lockdown.plist belongs to this exact device and can start a TLS session over the selected route. No RPPairing file was saved."
+        )
+    }
+}
+
 /// Create a new RPPairing record using an existing, user-imported Lockdown
 /// trust record over a TCP-reachable Lockdown endpoint (e.g. LocalDevVPN).
 /// This follows idevice_pair's RemotePairingLockdownService path, not raw TCP
@@ -560,80 +716,34 @@ pub unsafe extern "C" fn gasspair_create_rp_from_lockdown_endpoint(
     client_name: *const c_char,
     lockdown_path: *const c_char,
     out_path: *const c_char,
+    status_cb: GassPairStatusCb,
+    ctx: *mut c_void,
     out: *mut GassPairResult,
 ) -> i32 {
     if out.is_null() || port == 0 { return GASSPAIR_ERR_INVALID_ARG; }
     *out = GassPairResult::empty();
     let host = opt_str(host, "");
-    let name = opt_str(client_name, "GassPair");
+    let _name = opt_str(client_name, "GassPair");
     let lockdown_path = opt_str(lockdown_path, "");
-    let out_path = opt_str(out_path, "rp_pairing_file_from_lockdown.plist");
-    if host.is_empty() || lockdown_path.is_empty() || out_path.is_empty() {
-        (*out).error = raw_cstr("Host, imported Lockdown pairing file, and output path are required.");
+    let _out_path = opt_str(out_path, "rp_pairing_file_from_lockdown.plist");
+    if host.is_empty() || lockdown_path.is_empty() {
+        (*out).error = raw_cstr("Host and imported Lockdown pairing file are required.");
         return GASSPAIR_ERR_INVALID_ARG;
     }
-    let ip: IpAddr = match host.parse() {
-        Ok(ip) => ip,
-        Err(_) => {
-            (*out).error = raw_cstr("Host must be an IP address reachable through LocalDevVPN.");
-            return GASSPAIR_ERR_INVALID_ARG;
-        }
-    };
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()
-            .map_err(|e| format!("runtime: {e}"))?;
-        rt.block_on(async {
-            let bytes = tokio::fs::read(&lockdown_path).await
-                .map_err(|e| format!("read imported Lockdown plist: {e}"))?;
-            let lockdown_file = PairingFile::from_bytes(&bytes)
-                .map_err(|e| format!("invalid Lockdown pairing file: {e}"))?;
-            let provider = TcpProvider {
-                addr: ip,
-                scope_id: None,
-                pairing_file: lockdown_file,
-                label: name.clone(),
-            };
-            let mut file = RpPairingFile::generate(&name);
-            // First call creates/stores a remote pairing using the existing
-            // Lockdown trust. The second call follows the upstream pattern to
-            // reconnect and verify that the device retained the new identity.
-            for stage in ["create", "confirm"] {
-                tokio::time::timeout(Duration::from_secs(75), async {
-                    let service = RemotePairingLockdownService::connect(&provider).await
-                        .map_err(|e| format!("Lockdown-authenticated RemotePairing service ({stage}) failed: {e}"))?;
-                    let mut client = service.into_client(&name)
-                        .map_err(|e| format!("create RPPairing client ({stage}): {e}"))?;
-                    client.connect(&mut file, || async { "000000".to_string() }).await
-                        .map_err(|e| format!("RPPairing {stage} failed: {e}"))?;
-                    Ok::<(), String>(())
-                }).await.map_err(|_| format!("RPPairing {stage} timed out"))??;
-            }
-            // Strict verification: this pass may NOT fall back to pair-setup.
-            tokio::time::timeout(Duration::from_secs(30), async {
-                let service = RemotePairingLockdownService::connect(&provider).await
-                    .map_err(|e| format!("open verification service: {e}"))?;
-                let mut verifier = service.into_client(&name)
-                    .map_err(|e| format!("create verification client: {e}"))?;
-                verifier.attempt_pair_verify().await
-                    .map_err(|e| format!("new RPPairing pair-verify handshake failed: {e}"))?;
-                verifier.validate_pairing(&mut file).await
-                    .map_err(|e| format!("new RPPairing pair-verify validation failed: {e}"))?;
-                Ok::<(), String>(())
-            }).await.map_err(|_| "RPPairing pair-verify timed out".to_string())??;
-            save_pairing_file(&file, &out_path).await?;
-            Ok::<(String, String), String>((file.identifier.clone(), out_path.clone()))
-        })
-    }));
-    match result {
-        Ok(Ok((identifier, path))) => {
-            (*out).verified = 1;
-            (*out).device_name = raw_cstr(&format!("RPPairing created and pair-verify succeeded. Identifier: {identifier}"));
-            (*out).pairing_file_path = raw_cstr(&path);
-            GASSPAIR_OK
-        }
-        Ok(Err(e)) => { (*out).error = raw_cstr(&e); GASSPAIR_ERR }
-        Err(_) => { (*out).error = raw_cstr("Internal panic while creating RPPairing from Lockdown trust."); GASSPAIR_ERR }
-    }
+
+    // Important: this operation cannot be implemented correctly by connecting
+    // to TCP/62078 and then opening Lockdown's returned dynamic service port.
+    // The upstream idevice_pair implementation uses a usbmuxd-backed provider
+    // for RemotePairingLockdownService. An iOS app's TcpProvider plus
+    // LocalDevVPN is only raw IP routing; it does not provide usbmuxd's device
+    // socket/multiplexing semantics. Fail closed here rather than retrying an
+    // incompatible transport or ever reporting/saving a synthetic record.
+    let message = format!(
+        "Unsupported transport: cannot create RPPairing through direct TCP ({host}:{port}). Lockdown TCP reachability does not provide usbmuxd device-socket semantics for RemotePairingLockdownService. LocalDevVPN routes IP packets but does not implement usbmuxd. No RPPairing exchange was started and no file was written. Use a usbmuxd-backed macOS companion/relay for this operation, or use an endpoint that genuinely exposes the RPPairing protocol."
+    );
+    report_rp_progress(status_cb, ctx, GASSPAIR_STATUS_RP_FAILED, &message);
+    (*out).error = raw_cstr(&message);
+    GASSPAIR_ERR
 }
 
 /// Create a fresh RPPairing record by performing the real RemotePairing PIN

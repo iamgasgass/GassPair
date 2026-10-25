@@ -8,8 +8,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "2.3.3"
-    CURRENT_PROJECT_VERSION: "6"
+    MARKETING_VERSION: "2.3.8"
+    CURRENT_PROJECT_VERSION: "11"
     TARGETED_DEVICE_FAMILY: "1,2"
     EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
 

@@ -31,6 +31,15 @@ extern "C" {
 #define GASSPAIR_STATUS_VERIFYING 12      // Apple TV: verifying the pairing
 #define GASSPAIR_STATUS_VERIFY_FAILED 13  // Apple TV: message = reason (file still saved)
 #define GASSPAIR_STATUS_SAVING 20         // both: writing the pairing file
+#define GASSPAIR_STATUS_RP_TRUST_LOADING 40
+#define GASSPAIR_STATUS_RP_LOCKDOWN_SESSION 41
+#define GASSPAIR_STATUS_RP_SERVICE_OPEN 42
+#define GASSPAIR_STATUS_RP_PAIRING 43
+#define GASSPAIR_STATUS_RP_CONFIRMING 44
+#define GASSPAIR_STATUS_RP_VERIFYING 45
+#define GASSPAIR_STATUS_RP_SAVING 46
+#define GASSPAIR_STATUS_RP_COMPLETE 47
+#define GASSPAIR_STATUS_RP_FAILED 48
 
 typedef struct GassPairSession GassPairSession;
 
@@ -95,13 +104,16 @@ int32_t gasspair_pair_apple_tv(GassPairSession *session,
                                GassPairResult *out);
 
 // Create a real RPPairing record through the Lockdown-authenticated
-// com.apple.dt.remotepairingdeviced.lockdown service. `port` is normally 62078;
+// com.apple.dt.remotepairingdeviced.lockdown service. The optional status callback
+// receives progress codes 40-48; each message pointer is valid only during callback. `port` is normally 62078;
 // `lockdown_path` must be an existing, valid Lockdown pairing record for this
 // device. Returns success only after a new record passes pair-verify.
 int32_t gasspair_create_rp_from_lockdown_endpoint(const char *host, uint16_t port,
                                                    const char *client_name,
                                                    const char *lockdown_path,
                                                    const char *out_path,
+                                                   GassPairStatusCb status_cb,
+                                                   void *ctx,
                                                    GassPairResult *out);
 
 // Direct RPPairing endpoint operations. Host/port must be the actual RPPairing

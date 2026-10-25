@@ -121,11 +121,52 @@ Quando importi un plist RPPairing valido, GassPair passa automaticamente alla mo
 Se non hai importato un record, GassPair mostra invece il campo PIN e il flusso **Create new + pair-verify + save**: la nuova creazione richiede il codice temporaneo fornito dal servizio remoto, non può ricavarlo da un altro plist. Usa solo l'endpoint RPPairing effettivo; la porta Lockdown `62078` non è il servizio RPPairing.
 
 
-## Create RPPairing from an imported Lockdown trust record (2.3.3)
+## Create RPPairing from an imported Lockdown trust record (2.3.4)
 
-The app now accepts an existing `Lockdown.plist` and uses it as the authenticated trust record for a TCP-reachable Lockdown endpoint (default port 62078, for example via LocalDevVPN). The Rust backend uses `TcpProvider` and `RemotePairingLockdownService` from the pinned `idevice` crate, creates an `RpPairingFile` through the actual device service, reconnects and verifies the resulting record with `attempt_pair_verify` and `validate_pairing`, and only then atomically saves `rp_pairing_file_from_lockdown.plist`. This does not call classic `Request=Pair` and does not synthesize an RPPairing record. The endpoint must be the intended device and the imported Lockdown record must be valid for it. The iOS app cannot provide usbmuxd itself; this path uses the Lockdown TCP endpoint authenticated by the imported record. Full Xcode/iOS-device verification remains necessary.
+Historical note (superseded by 2.3.6): an earlier implementation attempted to use `TcpProvider` to reach the private service. This was not equivalent to the usbmuxd-backed upstream transport and could fail with `device socket io failed`. Version 2.3.6 disables that incompatible attempt; see `docs/USBMUXD-TRANSPORT.md`.
 
 
-### Import Lockdown trust and create a new RPPairing record (2.3.3)
+### Import Lockdown trust and create a new RPPairing record (2.3.4)
 
-Use the separate **Create RPPairing from trusted Lockdown record** panel. Import a genuine `Lockdown.plist` for the target, set the target IP reachable through LocalDevVPN, and run the action. The backend parses the Lockdown pairing file, creates an `idevice::provider::TcpProvider`, opens `com.apple.dt.remotepairingdeviced.lockdown` via `RemotePairingLockdownService`, uses the existing Lockdown trust to perform the real RPPairing operation, reconnects, and requires strict `attempt_pair_verify` + `validate_pairing` before writing `rp_pairing_file_from_lockdown.plist`. The operation does not use the classic Lockdown `Pair` request and never fabricates an RPPairing record. The imported Lockdown file is sensitive and is stored with complete file protection. This path is based on the upstream `idevice_pair` `remote_file` flow and has static integration tests; actual operation still requires a compatible reachable service and a successful iOS build/device test.
+Historical note (superseded by 2.3.6): the previous UI described direct TCP creation as if it reproduced the upstream usbmuxd route. It did not. The current UI and backend report the transport requirement and do not attempt creation over that unsupported path.
+
+
+## Lockdown-trust RPPairing status and diagnostics (2.3.4)
+
+The **Create RPPairing from trusted Lockdown record** card now displays progress and final errors in-place instead of writing the result only in the separate remote-endpoint card lower in the scroll view. Rust reports each stage over the FFI callback: Lockdown plist loading, authenticated Lockdown/service open, RPPairing create/confirm, fresh pair-verify, and atomic save. The service-open and verification stages have individual timeouts and explain if the Lockdown port is reachable but the secondary service socket is not reachable through the selected route. Other RPPairing actions are disabled during this job so two writes cannot race on the same output record.
+
+The operation now uses `fresh_pairing_file(&name)` so each new RPPairing attempt gets a fresh identifier derived from the newly generated key, instead of reusing the deterministic identifier from `RpPairingFile::generate("GassPair")`. The file is still published only after independent pair-verify succeeds. A timeout or error is shown inside the button card with recent stage history; no success is claimed and no new verified file is exported.
+
+
+## RPPairing service-socket diagnostics (2.3.5)
+
+Historical note (superseded by 2.3.6): the staged direct-TCP diagnostic flow has been removed from the creation path because it cannot reproduce usbmuxd device-socket semantics.
+
+This is a diagnostic and compatibility improvement, not a claim that the private service is supported over raw TCP. Upstream `idevice_pair` uses its `usbmuxd` link for `RemotePairingLockdownService`; Wi-Fi visibility in macOS can still be mediated by usbmuxd. LocalDevVPN routes IP packets and does not itself implement usbmuxd service multiplexing. If Lockdown on TCP/62078 works but the internal service socket or its first RPPairing exchange fails, no record is saved. The message will include the actual failing stage and dynamic port when available, so we can tell if the next step requires a usbmuxd-backed helper rather than more changes to the PIN/crypto exchange.
+
+LocalDevVPN by itself is not that companion: a separate usbmuxd-backed macOS component is required to reproduce the upstream service transport.
+
+
+## Versione 2.3.7 — companion macOS con provider usbmuxd
+
+La creazione RPPairing dal `Lockdown.plist` importato ora passa attraverso il companion macOS incluso in `companion/`, perché `RemotePairingLockdownService` deve essere aperto con un provider usbmuxd e non con una `TcpProvider` diretta su iOS. Il client iOS usa TLS con pin SHA-256 del certificato e token d'accesso; il companion controlla che il record Lockdown apra una sessione TLS per l'UDID scelto, apre il servizio RPPairing tramite usbmuxd, replica la sequenza upstream in due passaggi (pairing e salvataggio sul dispositivo), quindi esegue `attempt_pair_verify` + `validate_pairing` su una terza connessione indipendente. Il file viene restituito e salvato sul telefono soltanto dopo il successo di tutte le verifiche.
+
+### Compilare ed avviare il companion sul Mac
+
+Sul Mac che vede l'iPhone in usbmuxd attraverso Wi-Fi/rete (la connessione usbmuxd wireless deve essere già attiva; USB non è necessaria se il dispositivo è già visibile):
+
+```sh
+cargo build --release --manifest-path companion/Cargo.toml
+./companion/target/release/gasspair-usbmuxd-companion --bind <IP-MAC-RAGGIUNGIBILE>:47821
+```
+
+Al primo avvio il companion stampa il fingerprint SHA-256 del certificato TLS e genera un token d'accesso; il token è conservato con permessi restrittivi in `~/Library/Application Support/GassPairCompanion/access-token.txt`. Inserisci host, porta, fingerprint e token in **macOS usbmuxd companion** in GassPair. Il bind deve essere l'IP reale del Mac raggiungibile dall'iPhone, non l'IP dell'iPhone usato nei test precedenti. Il servizio rifiuta wildcard e loopback, richiede TLS pinning e token e non scrive le pairing keys nei log.
+
+Dopo aver inserito i parametri, premi **Connect securely and list usbmuxd devices**, seleziona il corretto UDID, importa il Lockdown.plist fidato e scegli **Create + pair-verify + save via usbmuxd**. Per verificare un RPPairing esistente usa la funzione Verify: non avvia un nuovo pair-setup.
+
+Il companion usa la libreria upstream `idevice` e l'API `UsbmuxdProvider`; LocalDevVPN fornisce solo la route IP verso il Mac. Se l'iPhone non è visibile al Mac tramite usbmuxd o il Lockdown record non apre TLS per quel dispositivo, l'operazione si ferma senza restituire un file. Il flusso end-to-end deve essere confermato su un Mac reale e un iPhone reale; i test statici non sostituiscono questa prova.
+
+
+## Versione 2.3.8 — sequenza RPPairing upstream
+
+Il companion macOS ora replica la sequenza a due connessioni usata da `idevice_pair::remote_file()` per il servizio `com.apple.dt.remotepairingdeviced.lockdown`: “Pairing through Lockdown” e “Saving the pairing on the device”. Dopo questi passaggi apre una terza connessione usbmuxd dedicata esclusivamente alla verifica `attempt_pair_verify` + `validate_pairing`. Il record viene restituito solo dopo il superamento della verifica indipendente. Il timeout di setup/save è stato aumentato a 240 secondi per coprire entrambe le operazioni.
