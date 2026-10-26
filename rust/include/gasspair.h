@@ -40,6 +40,10 @@ extern "C" {
 #define GASSPAIR_STATUS_RP_SAVING 46
 #define GASSPAIR_STATUS_RP_COMPLETE 47
 #define GASSPAIR_STATUS_RP_FAILED 48
+// Integrated (in-app) usbmuxd companion
+#define GASSPAIR_STATUS_MUX_PROBING 60          // message = candidate endpoint
+#define GASSPAIR_STATUS_MUX_ATTACHED 61         // message = "udid\nname\nproductType\niOS\nendpoint"
+#define GASSPAIR_STATUS_MUX_ENDPOINT_FAILED 62  // message = "endpoint: reason"
 
 typedef struct GassPairSession GassPairSession;
 
@@ -69,6 +73,8 @@ typedef struct {
     char *pairing_file_path;
     char *host_alt_irk_hex;
     int32_t verified;
+    char *endpoint;    // integrated companion: endpoint that accepted the trust
+    char *os_version;  // integrated companion: iOS version from Lockdown
 } GassPairResult;
 
 // Sessions are one-shot: new -> run (on a background thread) -> free.
@@ -103,6 +109,48 @@ int32_t gasspair_pair_apple_tv(GassPairSession *session,
                                void *ctx,
                                GassPairResult *out);
 
+// ---------------------------------------------------------------------------
+// Integrated usbmuxd companion (no Mac required)
+//
+// In-app replacement for the macOS usbmuxd companion. The provider performs
+// usbmuxd's Connect step itself (a device socket to <endpoint>:<port>, e.g.
+// through LocalDevVPN), and the rest is the same flow the companion ran:
+// authenticated Lockdown with the imported trust, StartService
+// com.apple.dt.remotepairingdeviced.lockdown, the two-pass RPPairing sequence,
+// an independent pair-verify on a third connection, then an atomic save.
+//
+// `endpoints`: newline-separated candidate device addresses, tried in order;
+// NULL/empty = 10.7.0.1 (LocalDevVPN). Sessions are one-shot and cancellable
+// with gasspair_session_cancel. Status codes 40-48 and 60-62 are reported.
+// ---------------------------------------------------------------------------
+int32_t gasspair_mux_probe(GassPairSession *session,
+                           const char *endpoints,
+                           const char *lockdown_path,
+                           GassPairStatusCb status_cb,
+                           void *ctx,
+                           GassPairResult *out);
+
+int32_t gasspair_mux_create_rppairing(GassPairSession *session,
+                                      const char *endpoints,
+                                      const char *lockdown_path,
+                                      const char *client_name,
+                                      const char *out_path,
+                                      GassPairStatusCb status_cb,
+                                      void *ctx,
+                                      GassPairResult *out);
+
+int32_t gasspair_mux_verify_rppairing(GassPairSession *session,
+                                      const char *endpoints,
+                                      const char *lockdown_path,
+                                      const char *rp_path,
+                                      const char *client_name,
+                                      const char *out_path,
+                                      GassPairStatusCb status_cb,
+                                      void *ctx,
+                                      GassPairResult *out);
+
+// Deprecated (2.3.x ABI): now runs gasspair_mux_create_rppairing on `host`
+// without a cancellable session; `port` is ignored (Lockdown is 62078).
 // Create a real RPPairing record through the Lockdown-authenticated
 // com.apple.dt.remotepairingdeviced.lockdown service. The optional status callback
 // receives progress codes 40-48; each message pointer is valid only during callback. `port` is normally 62078;

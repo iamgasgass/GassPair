@@ -29,6 +29,8 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+mod embedded_mux;
+
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::future::Future;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -44,12 +46,6 @@ use idevice::remote_pairing::{
     RpPairingFile, RpPairingSocket,
 };
 use idevice::IdeviceError;
-use idevice::IdeviceService;
-use idevice::lockdown::LockdownClient;
-use idevice::pairing_file::PairingFile;
-use idevice::provider::{IdeviceProvider, TcpProvider};
-use idevice::remote_pairing::RemotePairingLockdownService;
-use std::net::IpAddr;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 use tokio::task::JoinSet;
@@ -129,6 +125,10 @@ pub struct GassPairResult {
     pub host_alt_irk_hex: *mut c_char,
     /// 1 if the pairing was verified with a second connection (Apple TV only).
     pub verified: i32,
+    /// Integrated companion: device endpoint that accepted the Lockdown trust.
+    pub endpoint: *mut c_char,
+    /// Integrated companion: iOS version reported by Lockdown.
+    pub os_version: *mut c_char,
 }
 
 impl GassPairResult {
@@ -141,6 +141,8 @@ impl GassPairResult {
             pairing_file_path: ptr::null_mut(),
             host_alt_irk_hex: ptr::null_mut(),
             verified: 0,
+            endpoint: ptr::null_mut(),
+            os_version: ptr::null_mut(),
         }
     }
 }
@@ -249,18 +251,6 @@ fn raw_cstr(s: &str) -> *mut c_char {
     to_cstring(s).into_raw()
 }
 
-fn report_rp_progress(callback: GassPairStatusCb, ctx: *mut c_void, code: i32, message: &str) {
-    if let Some(callback) = callback {
-        // C strings cannot contain NUL. Keep reporting best-effort and never panic
-        // across the FFI boundary due to a malformed diagnostic string.
-        let safe = message.replace('\0', " ");
-        if let Ok(text) = CString::new(safe) {
-            callback(ctx, code, text.as_ptr());
-        }
-    }
-}
-
-
 unsafe fn opt_str(p: *const c_char, default: &str) -> String {
     if p.is_null() {
         return default.to_string();
@@ -368,9 +358,9 @@ fn bind_listener(port: u16) -> std::io::Result<TcpListener> {
 
 /// Runs `work` on a fresh runtime, racing it against the session's cancel flag
 /// and an optional overall timeout. Panics are turned into errors.
-fn run_flow<F>(session: &GassPairSession, timeout: Option<Duration>, work: F) -> Result<Paired, Fail>
+fn run_flow<F, T>(session: &GassPairSession, timeout: Option<Duration>, work: F) -> Result<T, Fail>
 where
-    F: Future<Output = Result<Paired, Fail>>,
+    F: Future<Output = Result<T, Fail>>,
 {
     // A current-thread runtime + LocalSet: everything runs on the calling
     // (background) thread, so none of idevice's futures need to be `Send`.
@@ -508,6 +498,8 @@ pub unsafe extern "C" fn gasspair_result_free(r: *mut GassPairResult) {
         (*r).device_udid,
         (*r).pairing_file_path,
         (*r).host_alt_irk_hex,
+        (*r).endpoint,
+        (*r).os_version,
     ] {
         if !p.is_null() {
             drop(CString::from_raw(p));
@@ -572,147 +564,138 @@ pub unsafe extern "C" fn gasspair_verify_rp_endpoint(
     }
 }
 
-/// Opens remotepairingdeviced.lockdown with stage-specific diagnostics over the
-/// TCP provider. The public `IdeviceService::connect` helper hides each step and
-/// collapses failures into errors like "device socket io failed"; doing the
-/// steps explicitly tells us whether Lockdown auth, StartService, the dynamic
-/// service socket, or RPPairing protocol I/O is the failing boundary.
-async fn open_rp_lockdown_service_over_tcp(
-    provider: &TcpProvider,
-    client_name: &str,
-    stage: &str,
+// ---------------------------------------------------------------------------
+// Integrated usbmuxd companion (in-app replacement for the macOS helper)
+// ---------------------------------------------------------------------------
+
+const MUX_CLIENT_NAME: &str = "GassPair";
+const MUX_PROBE_FLOW_TIMEOUT: Duration = Duration::from_secs(120);
+const MUX_CREATE_FLOW_TIMEOUT: Duration = Duration::from_secs(480);
+const MUX_VERIFY_FLOW_TIMEOUT: Duration = Duration::from_secs(180);
+
+unsafe fn write_mux_outcome(
+    out: *mut GassPairResult,
+    outcome: Result<embedded_mux::MuxOutcome, Fail>,
+) -> i32 {
+    match outcome {
+        Ok(done) => {
+            let (paired, endpoint, os_version) = done.into_paired();
+            (*out).endpoint = raw_cstr(&endpoint);
+            (*out).os_version = raw_cstr(&os_version);
+            write_outcome(out, Ok(paired))
+        }
+        Err(fail) => write_outcome(out, Err(fail)),
+    }
+}
+
+/// Common FFI prelude: resets `out`, validates and claims the session.
+unsafe fn begin_mux<'a>(session: *mut GassPairSession, out: *mut GassPairResult) -> Result<&'a GassPairSession, i32> {
+    if out.is_null() {
+        return Err(GASSPAIR_ERR_INVALID_ARG);
+    }
+    *out = GassPairResult::empty();
+    let Some(session) = session.as_ref() else {
+        (*out).error = raw_cstr("invalid session");
+        return Err(GASSPAIR_ERR_INVALID_ARG);
+    };
+    if !claim(session) {
+        (*out).error = raw_cstr("session already used");
+        return Err(GASSPAIR_ERR_INVALID_ARG);
+    }
+    Ok(session)
+}
+
+fn mux_callbacks(status_cb: GassPairStatusCb, ctx: *mut c_void) -> Callbacks {
+    Callbacks { ready: None, pin: None, pin_request: None, status: status_cb, ctx }
+}
+
+/// Integrated companion — finds the device automatically. Tries every address
+/// in `endpoints` (newline separated; empty = LocalDevVPN 10.7.0.1) and returns
+/// the first that accepts an authenticated Lockdown session with the imported
+/// trust: UDID, name, ProductType (device_model), iOS version and endpoint.
+#[no_mangle]
+pub unsafe extern "C" fn gasspair_mux_probe(
+    session: *mut GassPairSession,
+    endpoints: *const c_char,
+    lockdown_path: *const c_char,
     status_cb: GassPairStatusCb,
     ctx: *mut c_void,
-) -> Result<RemotePairingLockdownService, String> {
-    report_rp_progress(
-        status_cb,
-        ctx,
-        GASSPAIR_STATUS_RP_LOCKDOWN_SESSION,
-        &format!("{stage}: connecting to Lockdown TCP on the configured endpoint…"),
-    );
-    let mut lockdown = tokio::time::timeout(
-        Duration::from_secs(10),
-        LockdownClient::connect(provider),
-    )
-    .await
-    .map_err(|_| format!("{stage}: connecting to Lockdown TCP/62078 timed out after 10 seconds"))?
-    .map_err(|e| explain_rp_transport_error(&format!("{stage}: Lockdown TCP connection failed"), e))?;
-
-    let pairing_file = provider
-        .get_pairing_file()
-        .await
-        .map_err(|e| format!("{stage}: could not load imported Lockdown trust record: {e}"))?;
-    report_rp_progress(
-        status_cb,
-        ctx,
-        GASSPAIR_STATUS_RP_LOCKDOWN_SESSION,
-        &format!("{stage}: Lockdown socket opened; authenticating with imported HostID/SystemBUID via StartSession TLS…"),
-    );
-    let legacy = tokio::time::timeout(
-        Duration::from_secs(15),
-        lockdown.start_session(&pairing_file),
-    )
-    .await
-    .map_err(|_| format!("{stage}: Lockdown StartSession TLS timed out after 15 seconds"))?
-    .map_err(|e| explain_rp_transport_error(&format!("{stage}: Lockdown StartSession TLS failed"), e))?;
-
-    let version = lockdown
-        .get_value(Some("ProductVersion"), None)
-        .await
-        .ok()
-        .and_then(|v| v.as_string().map(str::to_owned))
-        .unwrap_or_else(|| "unknown".to_string());
-    let service_name = RemotePairingLockdownService::service_name().into_owned();
-    report_rp_progress(
-        status_cb,
-        ctx,
-        GASSPAIR_STATUS_RP_SERVICE_OPEN,
-        &format!("{stage}: authenticated Lockdown session established (iOS {version}); requesting StartService for {service_name}…"),
-    );
-    let (service_port, ssl) = tokio::time::timeout(
-        Duration::from_secs(12),
-        lockdown.start_service(service_name.clone()),
-    )
-    .await
-    .map_err(|_| format!("{stage}: Lockdown StartService({service_name}) timed out after 12 seconds"))?
-    .map_err(|e| explain_rp_transport_error(&format!("{stage}: Lockdown refused StartService({service_name})"), e))?;
-
-    report_rp_progress(
-        status_cb,
-        ctx,
-        GASSPAIR_STATUS_RP_SERVICE_OPEN,
-        &format!("{stage}: Lockdown returned service port {service_port} (EnableServiceSSL={ssl}). Now opening that service socket directly through LocalDevVPN; this is distinct from TCP/62078…"),
-    );
-    let mut service_socket = tokio::time::timeout(
-        Duration::from_secs(10),
-        provider.connect(service_port),
-    )
-    .await
-    .map_err(|_| format!("{stage}: service {service_name} port {service_port} was not reachable over LocalDevVPN within 10 seconds. Lockdown TCP/62078 may work while this second port is not routed."))?
-    .map_err(|e| explain_rp_transport_error(&format!("{stage}: TCP connection to Lockdown-assigned service port {service_port} failed"), e))?;
-
-    if ssl {
-        report_rp_progress(
-            status_cb,
-            ctx,
-            GASSPAIR_STATUS_RP_SERVICE_OPEN,
-            &format!("{stage}: the service requires TLS; establishing the service TLS session using the imported Lockdown record…"),
-        );
-        tokio::time::timeout(
-            Duration::from_secs(15),
-            service_socket.start_session(&pairing_file, legacy),
-        )
-        .await
-        .map_err(|_| format!("{stage}: TLS setup on service port {service_port} timed out after 15 seconds"))?
-        .map_err(|e| explain_rp_transport_error(&format!("{stage}: TLS setup on service port {service_port} failed"), e))?;
+    out: *mut GassPairResult,
+) -> i32 {
+    let session = match begin_mux(session, out) { Ok(s) => s, Err(rc) => return rc };
+    let lockdown_path = opt_str(lockdown_path, "");
+    if lockdown_path.is_empty() {
+        (*out).error = raw_cstr("Import a Lockdown.plist first.");
+        return GASSPAIR_ERR_INVALID_ARG;
     }
-
-    report_rp_progress(
-        status_cb,
-        ctx,
-        GASSPAIR_STATUS_RP_SERVICE_OPEN,
-        &format!("{stage}: service port {service_port} is connected; constructing the RPPairing protocol client…"),
-    );
-    RemotePairingLockdownService::from_stream(service_socket)
-        .await
-        .map_err(|e| explain_rp_transport_error(&format!("{stage}: converting the service socket to RemotePairingLockdownService failed"), e))
+    let endpoints = embedded_mux::parse_endpoints(&opt_str(endpoints, ""));
+    let flow = embedded_mux::probe_flow(endpoints, lockdown_path, MUX_CLIENT_NAME.into(), mux_callbacks(status_cb, ctx));
+    write_mux_outcome(out, run_flow(session, Some(MUX_PROBE_FLOW_TIMEOUT), flow))
 }
 
-fn explain_rp_transport_error(stage: &str, error: impl std::fmt::Display) -> String {
-    let detail = error.to_string();
-    let lower = detail.to_ascii_lowercase();
-    let is_device_socket_io = lower.contains("device socket io failed")
-        || lower.contains("device socket i/o failed")
-        || lower.contains("devicesocketio");
-    if !is_device_socket_io {
-        return format!("{stage}: {detail}");
+/// Integrated companion — fully automatic RPPairing creation from an imported
+/// Lockdown trust: probe → RemotePairingLockdownService two-pass sequence →
+/// independent pair-verify on a third connection → atomic save + read-back.
+/// Status codes 40-48 and 60-62 are reported. Nothing is written on failure.
+#[no_mangle]
+pub unsafe extern "C" fn gasspair_mux_create_rppairing(
+    session: *mut GassPairSession,
+    endpoints: *const c_char,
+    lockdown_path: *const c_char,
+    client_name: *const c_char,
+    out_path: *const c_char,
+    status_cb: GassPairStatusCb,
+    ctx: *mut c_void,
+    out: *mut GassPairResult,
+) -> i32 {
+    let session = match begin_mux(session, out) { Ok(s) => s, Err(rc) => return rc };
+    let lockdown_path = opt_str(lockdown_path, "");
+    let out_path = opt_str(out_path, "");
+    if lockdown_path.is_empty() || out_path.is_empty() {
+        (*out).error = raw_cstr("Lockdown.plist path and output path are required.");
+        return GASSPAIR_ERR_INVALID_ARG;
     }
-
-    if stage.contains("RPPairing") || stage.contains("RemotePairingLockdownService") {
-        format!(
-            "{stage}: device socket I/O failed ({detail}). The authenticated RemotePairingLockdownService socket was opened, but its RPPairing wire exchange failed. Upstream idevice_pair accesses this private service through usbmuxd; a raw TcpProvider over LocalDevVPN is not usbmuxd multiplexing. This is a transport-boundary failure, not a PIN guess to retry. No RPPairing file is saved unless the full protocol and pair-verify complete."
-        )
-    } else if stage.contains("service port") || stage.contains("StartService") || stage.contains("service TLS") {
-        format!(
-            "{stage}: device socket I/O failed ({detail}). Lockdown TCP/62078 may be reachable while the separate device-assigned RemotePairingLockdownService socket is not usable through raw TCP. Upstream idevice_pair opens this private service through usbmuxd; LocalDevVPN routes IP packets but does not implement usbmuxd multiplexing. No RPPairing file was saved."
-        )
-    } else {
-        format!(
-            "{stage}: device socket I/O failed ({detail}). The failure occurred in the Lockdown control/authentication phase, before the RPPairing wire exchange. Check that the imported Lockdown.plist belongs to this exact device and can start a TLS session over the selected route. No RPPairing file was saved."
-        )
-    }
+    let name = opt_str(client_name, MUX_CLIENT_NAME);
+    let endpoints = embedded_mux::parse_endpoints(&opt_str(endpoints, ""));
+    let flow = embedded_mux::create_flow(endpoints, lockdown_path, name, out_path, mux_callbacks(status_cb, ctx));
+    write_mux_outcome(out, run_flow(session, Some(MUX_CREATE_FLOW_TIMEOUT), flow))
 }
 
-/// Create a new RPPairing record using an existing, user-imported Lockdown
-/// trust record over a TCP-reachable Lockdown endpoint (e.g. LocalDevVPN).
-/// This follows idevice_pair's RemotePairingLockdownService path, not raw TCP
-/// to an RPPairing port. The imported Lockdown record is used only to start the
-/// authenticated Lockdown session; the new RPPairing record is created by the
-/// device's remotepairingdeviced service and is verified before being saved.
+/// Integrated companion — pair-verify an existing RPPairing record (no setup,
+/// no PIN) and write a verified byte-identical copy to `out_path`.
+#[no_mangle]
+pub unsafe extern "C" fn gasspair_mux_verify_rppairing(
+    session: *mut GassPairSession,
+    endpoints: *const c_char,
+    lockdown_path: *const c_char,
+    rp_path: *const c_char,
+    client_name: *const c_char,
+    out_path: *const c_char,
+    status_cb: GassPairStatusCb,
+    ctx: *mut c_void,
+    out: *mut GassPairResult,
+) -> i32 {
+    let session = match begin_mux(session, out) { Ok(s) => s, Err(rc) => return rc };
+    let lockdown_path = opt_str(lockdown_path, "");
+    let rp_path = opt_str(rp_path, "");
+    let out_path = opt_str(out_path, "");
+    if lockdown_path.is_empty() || rp_path.is_empty() || out_path.is_empty() {
+        (*out).error = raw_cstr("Lockdown.plist, RPPairing file and output paths are required.");
+        return GASSPAIR_ERR_INVALID_ARG;
+    }
+    let name = opt_str(client_name, MUX_CLIENT_NAME);
+    let endpoints = embedded_mux::parse_endpoints(&opt_str(endpoints, ""));
+    let flow = embedded_mux::verify_flow(endpoints, lockdown_path, rp_path, name, out_path, mux_callbacks(status_cb, ctx));
+    write_mux_outcome(out, run_flow(session, Some(MUX_VERIFY_FLOW_TIMEOUT), flow))
+}
+
+/// Kept for ABI compatibility (2.3.x). Now runs the integrated companion on
+/// `host` (Lockdown is always 62078, so `port` is ignored) without a
+/// cancellable session.
 #[no_mangle]
 pub unsafe extern "C" fn gasspair_create_rp_from_lockdown_endpoint(
     host: *const c_char,
-    port: u16,
+    _port: u16,
     client_name: *const c_char,
     lockdown_path: *const c_char,
     out_path: *const c_char,
@@ -720,30 +703,10 @@ pub unsafe extern "C" fn gasspair_create_rp_from_lockdown_endpoint(
     ctx: *mut c_void,
     out: *mut GassPairResult,
 ) -> i32 {
-    if out.is_null() || port == 0 { return GASSPAIR_ERR_INVALID_ARG; }
-    *out = GassPairResult::empty();
-    let host = opt_str(host, "");
-    let _name = opt_str(client_name, "GassPair");
-    let lockdown_path = opt_str(lockdown_path, "");
-    let _out_path = opt_str(out_path, "rp_pairing_file_from_lockdown.plist");
-    if host.is_empty() || lockdown_path.is_empty() {
-        (*out).error = raw_cstr("Host and imported Lockdown pairing file are required.");
-        return GASSPAIR_ERR_INVALID_ARG;
-    }
-
-    // Important: this operation cannot be implemented correctly by connecting
-    // to TCP/62078 and then opening Lockdown's returned dynamic service port.
-    // The upstream idevice_pair implementation uses a usbmuxd-backed provider
-    // for RemotePairingLockdownService. An iOS app's TcpProvider plus
-    // LocalDevVPN is only raw IP routing; it does not provide usbmuxd's device
-    // socket/multiplexing semantics. Fail closed here rather than retrying an
-    // incompatible transport or ever reporting/saving a synthetic record.
-    let message = format!(
-        "Unsupported transport: cannot create RPPairing through direct TCP ({host}:{port}). Lockdown TCP reachability does not provide usbmuxd device-socket semantics for RemotePairingLockdownService. LocalDevVPN routes IP packets but does not implement usbmuxd. No RPPairing exchange was started and no file was written. Use a usbmuxd-backed macOS companion/relay for this operation, or use an endpoint that genuinely exposes the RPPairing protocol."
-    );
-    report_rp_progress(status_cb, ctx, GASSPAIR_STATUS_RP_FAILED, &message);
-    (*out).error = raw_cstr(&message);
-    GASSPAIR_ERR
+    let session = gasspair_session_new();
+    let rc = gasspair_mux_create_rppairing(session, host, lockdown_path, client_name, out_path, status_cb, ctx, out);
+    gasspair_session_free(session);
+    rc
 }
 
 /// Create a fresh RPPairing record by performing the real RemotePairing PIN

@@ -10,7 +10,7 @@ struct ContentView: View {
     @FocusState private var pinFieldFocused: Bool
     @State private var showingRPFileImporter = false
     @State private var showingLockdownFileImporter = false
-    @State private var showingMacUSBMuxdCompanion = false
+    @State private var showingIntegratedCompanion = false
     @State private var lockdownImportMessage: String?
     @State private var lockdownImportSucceeded = false
     @State private var lockdownPairingLoaded = false
@@ -61,13 +61,14 @@ struct ContentView: View {
                       allowsMultipleSelection: false) { result in
             importLockdownPairingFile(result)
         }
-        .sheet(isPresented: $showingMacUSBMuxdCompanion) {
+        .sheet(isPresented: $showingIntegratedCompanion) {
             NavigationStack {
-                MacUsbmuxdCompanionView(initialLockdownFileURL: lockdownPairingLoaded ? importedLockdownFileURL : nil)
+                IntegratedUsbmuxdCompanionView()
             }
         }
         .onAppear {
             refreshStoredRPImportState()
+            lockdownPairingLoaded = FileManager.default.fileExists(atPath: importedLockdownFileURL.path)
         }
     }
 
@@ -136,7 +137,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Create RPPairing from trusted Lockdown record")
                         .font(.headline)
-                    Text("RemotePairingLockdownService must be opened through a usbmuxd device provider. LocalDevVPN alone is raw IP routing, so GassPair does not open the service's dynamic socket directly. Use the authenticated, certificate-pinned macOS companion to run the native provider flow and return only a record that passed fresh pair-verify.")
+                    Text("The usbmuxd companion is built into GassPair: no Mac needed. Import the Lockdown.plist and it finds the device by itself (LocalDevVPN 10.7.0.1 or Wi-Fi), opens RemotePairingLockdownService, creates the record and saves it only after an independent pair-verify.")
                         .font(.caption).foregroundStyle(.secondary)
                     Button {
                         showingLockdownFileImporter = true
@@ -146,9 +147,9 @@ struct ContentView: View {
                     }
                     .pillButton()
                     Button {
-                        showingMacUSBMuxdCompanion = true
+                        showingIntegratedCompanion = true
                     } label: {
-                        Label("Open macOS usbmuxd companion", systemImage: "network.badge.shield.half.filled")
+                        Label("Open integrated usbmuxd companion", systemImage: "cable.connector")
                             .frame(maxWidth: .infinity)
                     }
                     .pillButton()
@@ -497,18 +498,12 @@ struct ContentView: View {
             let scoped = source.startAccessingSecurityScopedResource()
             defer { if scoped { source.stopAccessingSecurityScopedResource() } }
             let data = try Data(contentsOf: source, options: [.mappedIfSafe])
-            guard data.count <= 2_097_152 else { throw RPImportError.invalid("Lockdown plist exceeds 2 MiB.") }
-            guard let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
-                throw RPImportError.invalid("Lockdown file is not a property-list dictionary.")
-            }
-            let required = ["HostID", "SystemBUID", "HostCertificate", "HostPrivateKey", "RootCertificate", "RootPrivateKey", "DeviceCertificate"]
-            let missing = required.filter { plist[$0] == nil }
-            guard missing.isEmpty else { throw RPImportError.invalid("Lockdown pairing record is missing: \(missing.joined(separator: ", ")).") }
-            try data.write(to: importedLockdownFileURL, options: [.atomic])
-            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: importedLockdownFileURL.path)
+            try IntegratedUsbmuxdCompanion.storeLockdown(data)
             lockdownPairingLoaded = true
             lockdownImportSucceeded = true
-            lockdownImportMessage = "Lockdown pairing record imported locally. Remote trust has not yet been verified. Open the macOS usbmuxd companion to validate the imported record against the selected device and create RPPairing."
+            lockdownImportMessage = "Lockdown pairing record imported. The integrated usbmuxd companion is starting automatically."
+            IntegratedUsbmuxdCompanion.shared.lockdownImported()
+            showingIntegratedCompanion = true
         } catch {
             lockdownPairingLoaded = false
             lockdownImportSucceeded = false

@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""Static regression checks for usbmuxd transport boundary and fail-closed behavior."""
+"""Static checks for the integrated companion's stage diagnostics and fail-closed behaviour."""
 from pathlib import Path
 root = Path(__file__).resolve().parents[1]
-rust = (root / "rust/src/lib.rs").read_text()
-readme = (root / "README.md").read_text()
-docs = (root / "docs/USBMUXD-TRANSPORT.md").read_text()
-start = rust.index("gasspair_create_rp_from_lockdown_endpoint")
-end = rust.index("Create a fresh RPPairing record by performing", start)
-flow = rust[start:end]
+mux = (root / "rust/src/embedded_mux.rs").read_text()
+engine = (root / "App/IntegratedUsbmuxdCompanion.swift").read_text()
+open_service = mux[mux.index("async fn open_service"):mux.index("async fn write_verified_copy")]
+verify = mux[mux.index("pub(crate) async fn verify_flow"):mux.index("#[cfg(test)]")]
 checks = {
-    "Lockdown creation explicitly refuses unsupported direct TCP": "Unsupported transport: cannot create RPPairing through direct TCP" in flow,
-    "does not open dynamic service port over TcpProvider": "provider.connect(service_port)" not in flow,
-    "does not attempt RPPairing exchange in unsupported path": "client.connect(&mut file" not in flow,
-    "does not save any record on unsupported path": "save_pairing_file" not in flow,
-    "failure callback gives actionable diagnostic": "report_rp_progress(status_cb, ctx, GASSPAIR_STATUS_RP_FAILED, &message)" in flow,
-    "docs explain distinction between Lockdown and service socket": "TCP/62078" in docs and "dynamic service port" in docs,
-    "docs require a usbmuxd-backed macOS companion": "macOS executable" in docs and "usbmuxd-backed" in docs,
-    "README states LocalDevVPN does not implement usbmuxd": "LocalDevVPN routes IP packets and does not itself implement usbmuxd" in readme,
+    "each service-open step is reported": all(s in open_service for s in ("StartSession", "StartService", "opening device socket", "service TLS")),
+    "each step has its own timeout": open_service.count("MUX_STEP_TIMEOUT") >= 4,
+    "USB-only refusal is explained honestly": "only offers this service on the USB transport" in open_service,
+    "verify-only path never runs setup": "client.connect(" not in verify and "attempt_pair_verify()" in verify,
+    "verified copy is read back and compared": "back != bytes" in mux,
+    "missing alt_irk blocks saving": "alt_irk) is missing; nothing was saved" in mux,
+    "status codes forwarded to Swift": all(c in engine for c in ("GASSPAIR_STATUS_MUX_PROBING", "GASSPAIR_STATUS_MUX_ATTACHED", "GASSPAIR_STATUS_MUX_ENDPOINT_FAILED")),
+    "callback copies the C string synchronously": "String(cString: $0)" in engine,
+    "runs are cancellable": "gasspair_session_cancel(session)" in engine,
+    "failures after attach do not loop automatically": "phase = .failed(message: message)" in engine,
 }
 failed = False
 for label, passed in checks.items():

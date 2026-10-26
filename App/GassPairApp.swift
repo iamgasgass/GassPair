@@ -11,6 +11,7 @@ struct GassPairApp: App {
         .onChange(of: scenePhase) { phase in
             if phase == .active {
                 PairingController.shared.appBecameActive()
+                IntegratedUsbmuxdCompanion.shared.appBecameActive()
             }
         }
     }

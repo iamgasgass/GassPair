@@ -1,4 +1,38 @@
-# GassPair RPPairing through macOS usbmuxd (2.3.7)
+# GassPair RPPairing through usbmuxd
+
+## 2.4.0 — integrated companion (no Mac)
+
+The usbmuxd companion now runs **inside GassPair** (`rust/src/embedded_mux.rs`, Swift `App/IntegratedUsbmuxdCompanion.swift`). The macOS helper is kept only as an optional fallback.
+
+### Why it can live in the app
+
+`RemotePairingLockdownService::connect(provider)` is generic over `IdeviceProvider`. The provider contributes exactly two things:
+
+1. `connect(port)` — a device socket for `port`. For a device that the Mac's usbmuxd reaches over the network, usbmuxd's `Connect` is a TCP connection from the host to `<device-ip>:<port>`.
+2. `get_pairing_file()` — the Lockdown trust (the Mac helper already replaced usbmuxd's record with the imported one).
+
+Everything above that — Lockdown `StartSession` with HostID/SystemBUID, `StartService com.apple.dt.remotepairingdeviced.lockdown`, optional service TLS, the RPPairing exchange — is done by idevice and is identical for every provider. `EmbeddedMuxProvider` implements those two methods in the app, towards the device reached through LocalDevVPN (`10.7.0.1`) or Wi-Fi.
+
+### Automatic flow
+
+1. The Lockdown.plist is imported (the only user action). The companion screen opens and starts by itself.
+2. **Device discovery** replaces "list usbmuxd devices + pick UDID": the candidate endpoints (optional user address, `10.7.0.1`, then the device's own `en*` IPv4 addresses) are tried in order; the first one that accepts an authenticated Lockdown session with the imported trust wins. UDID, name, model and iOS version are read from Lockdown, and the UDID must match the record when the record carries one.
+3. If no endpoint answers (LocalDevVPN off, other network), the app **retries on its own** with back-off (5 s → 30 s) and immediately when it returns to the foreground.
+4. Two passes on `RemotePairingLockdownService` ("Pairing through Lockdown", "Saving the pairing on the device"), then a **third fresh connection** for `attempt_pair_verify` + `validate_pairing` only.
+5. Atomic save + read-back in Rust, then complete file protection and an Ed25519 consistency check in Swift. Nothing is written if any step fails; failures after the device was reached are not retried automatically.
+
+Every step (Lockdown connect, StartSession, StartService, device socket, service TLS, each pass, verify) has its own timeout and status message. idevice prints every `io::Error` as "device socket io failed"; the integrated companion appends the Debug form so the real cause (reset, EOF, refused, timeout) is visible.
+
+### Boundaries
+
+- If lockdownd refuses `StartService` for this service on a network route (some iOS builds may offer it on USB only), no network client — the app, or the Mac helper with a wireless device — can open it. The error says so; the only alternative then is the Mac companion with the device on a **USB cable**.
+- The imported Lockdown.plist must be a genuine record already trusted by that device.
+- End-to-end behaviour must still be confirmed on a real device; the static tests and unit tests do not prove that a given iOS build allows the service on the route used.
+
+---
+
+## Historical notes (2.3.7 macOS helper)
+
 
 ## Why the iOS-only TCP path cannot open this service
 

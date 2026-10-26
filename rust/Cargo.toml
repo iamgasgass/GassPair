@@ -1,6 +1,6 @@
 [package]
 name = "gasspair_ffi"
-version = "0.3.8"
+version = "0.4.0"
 edition = "2021"
 description = "GassPair: C FFI shim over idevice's on-device wireless pairing (iOS 27 pairable host + Apple TV)"
 

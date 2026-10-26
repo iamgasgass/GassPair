@@ -77,6 +77,7 @@ Requisiti per compilare: Xcode 27, Rust, `xcodegen`. App minima: **iOS 16**.
 - `rust/src/lib.rs` — FFI C su `idevice::remote_pairing` (`rust/include/gasspair.h`). Sessioni cancellabili, listener dual-stack IPv6/IPv4 con riapertura automatica, tentativi di connessione gestiti in parallelo, identificativo host casuale per sessione, 3 tentativi PIN + verifica per Apple TV, scrittura atomica e verificata del file, panic intercettati.
 - `App/PairingController.swift` — orchestrazione dei due flussi, annuncio mDNS con `NetService` (basta il permesso Rete locale, niente entitlement multicast), keep-alive con audio silenzioso/posizione + background task UIKit (tutto compatibile iOS 16). Su iOS 26+ l'interfaccia usa Liquid Glass, sotto usa materiali traslucidi.
 - `App/AppleTVDiscovery.swift` — ricerca `_remotepairing-manual-pairing._tcp` con indirizzi IPv4/IPv6 risolti.
+- `rust/src/embedded_mux.rs` + `App/IntegratedUsbmuxdCompanion*.swift` — companion usbmuxd integrato (2.4.0): provider in-app equivalente a usbmuxd `Connect`, ricerca automatica del dispositivo, RPPairing a due passaggi + verifica indipendente.
 
 ## Licenza
 
@@ -170,3 +171,23 @@ Il companion usa la libreria upstream `idevice` e l'API `UsbmuxdProvider`; Local
 ## Versione 2.3.8 — sequenza RPPairing upstream
 
 Il companion macOS ora replica la sequenza a due connessioni usata da `idevice_pair::remote_file()` per il servizio `com.apple.dt.remotepairingdeviced.lockdown`: “Pairing through Lockdown” e “Saving the pairing on the device”. Dopo questi passaggi apre una terza connessione usbmuxd dedicata esclusivamente alla verifica `attempt_pair_verify` + `validate_pairing`. Il record viene restituito solo dopo il superamento della verifica indipendente. Il timeout di setup/save è stato aumentato a 240 secondi per coprire entrambe le operazioni.
+
+
+## Versione 2.4.0 — Companion usbmuxd integrato (niente Mac)
+
+Il companion usbmuxd ora è **dentro l'app** e fa tutto da solo. Non servono più Mac, IP, fingerprint, token o scelta dell'UDID.
+
+**Uso:** importa il `Lockdown.plist` (schermata principale › *Import Lockdown.plist*). Si apre **usbmuxd (integrated)** e parte automaticamente:
+
+1. trova il dispositivo provando, in ordine, l'eventuale indirizzo extra, **LocalDevVPN `10.7.0.1`** e gli indirizzi Wi‑Fi del dispositivo; il primo che accetta una sessione Lockdown autenticata col record importato vince (UDID, nome, modello e versione iOS vengono letti da Lockdown e l'UDID deve coincidere con quello del record);
+2. se il dispositivo non è raggiungibile (LocalDevVPN spento, altra rete) **riprova da solo** (5 → 30 s) e subito quando torni nell'app;
+3. apre `com.apple.dt.remotepairingdeviced.lockdown`, esegue i due passaggi upstream («Pairing through Lockdown», «Saving the pairing on the device») e poi una **terza connessione** solo per `attempt_pair_verify` + `validate_pairing`;
+4. salva `rp_pairing_file_from_lockdown_verified.plist` in modo atomico, con protezione completa e controllo della coppia Ed25519; il file è esportabile e visibile in **File › Sul mio iPhone › GassPair**.
+
+Se hai importato un RPPairing esistente, **Verify imported RPPairing on the device** esegue solo pair-verify (nessun PIN, nessun nuovo setup) e scrive `rp_pairing_file_imported_usbmuxd_verified.plist`.
+
+**Perché funziona senza Mac:** il companion macOS usava `UsbmuxdProvider`, ma per un iPhone raggiunto via rete l'operazione `Connect` di usbmuxd è una connessione TCP a `IP-dispositivo:porta`; tutto il resto (StartSession, StartService, TLS del servizio, RPPairing) lo fa `idevice` allo stesso modo con qualsiasi provider. `EmbeddedMuxProvider` implementa quel `Connect` nell'app. Le note 2.3.4–2.3.8 qui sopra che dichiaravano necessario il Mac sono superate.
+
+**Limiti onesti:** se una build di iOS offre questo servizio solo su USB, lockdownd rifiuta `StartService` su qualunque percorso di rete (anche il Mac con iPhone in Wi‑Fi): l'app lo dice esplicitamente e in quel caso resta come ripiego facoltativo il companion macOS con il **cavo USB** (*Mac companion (optional fallback)*). Ogni errore indica la fase esatta e la causa I/O reale; nessun file viene salvato se un passaggio fallisce. Il flusso end-to-end va confermato su un dispositivo reale.
+
+API FFI nuove: `gasspair_mux_probe`, `gasspair_mux_create_rppairing`, `gasspair_mux_verify_rppairing` (stati 40–48 e 60–62). `gasspair_create_rp_from_lockdown_endpoint` resta per compatibilità e ora usa il motore integrato.
