@@ -1,6 +1,6 @@
 [package]
 name = "gasspair_ffi"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 description = "GassPair: C FFI shim over idevice's on-device wireless pairing (iOS 27 pairable host + Apple TV)"
 
@@ -17,6 +17,8 @@ idevice = { git = "https://github.com/jkcoxson/idevice.git", rev = "26a28f6a46b5
 
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "fs", "time", "sync", "io-util"] }
 socket2 = { version = "0.6", features = ["all"] }
+# Same major as idevice's plist, so `attempt_pair_verify()`'s Value is the same type.
+plist = "1.8"
 
 [profile.release]
 opt-level = 3

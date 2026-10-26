@@ -431,14 +431,27 @@ async fn first_pass(provider: &EmbeddedMuxProvider, base: &str, cbs: &Callbacks)
             .into_client(&host)
             .map_err(|e| Fail::Error(format!("{stage}: could not start the RPPairing client ({})", describe(&e))))?;
         let pin = || async { LOCKDOWN_CHANNEL_PIN.to_string() };
+        // Same messages as `RemotePairingClient::connect`, but step by step so
+        // the log says exactly which message the device answered by closing.
         let exchange = tokio::time::timeout(MUX_PAIR_PASS_TIMEOUT, async {
-            match strategy {
-                Strategy::Upstream => client.connect(&mut file, pin).await,
-                Strategy::DirectUniqueHost => {
-                    client.attempt_pair_verify().await?;
-                    client.pair(&mut file, pin).await
+            let handshake = client
+                .attempt_pair_verify()
+                .await
+                .map_err(|e| (ExchangeStep::Handshake, e))?;
+            cbs.status(
+                GASSPAIR_STATUS_RP_PAIRING,
+                &format!("{stage}: handshake accepted ({})", summarize_handshake(&handshake)),
+            );
+            if matches!(strategy, Strategy::Upstream) {
+                // A fresh key is unknown to the device: the expected answer is
+                // an explicit pair-verify failure, after which setup follows.
+                match client.validate_pairing(&mut file).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) if is_channel_closed(&e) => return Err((ExchangeStep::PairVerify, e)),
+                    Err(_) => cbs.status(GASSPAIR_STATUS_RP_PAIRING, &format!("{stage}: pair-verify declined as expected, starting pair-setup…")),
                 }
             }
+            client.pair(&mut file, pin).await.map_err(|e| (ExchangeStep::PairSetup, e))
         })
         .await
         .map_err(|_| Fail::Timeout(format!("{stage}: no answer from remotepairingdeviced within {} s", MUX_PAIR_PASS_TIMEOUT.as_secs())))?;
@@ -451,9 +464,17 @@ async fn first_pass(provider: &EmbeddedMuxProvider, base: &str, cbs: &Callbacks)
                 }
                 return Ok(FirstPass { file, host, peer });
             }
-            Err(e) => {
+            Err((step, e)) => {
                 let closed = is_channel_closed(&e);
-                attempts.push(format!("{what} as \"{host}\": {}", describe(&e)));
+                attempts.push(format!("{what} as \"{host}\" — closed at {}: {}", step.label(), describe(&e)));
+                if matches!(step, ExchangeStep::Handshake) && closed {
+                    // Nothing identity-related has been sent yet: another host
+                    // name or key cannot change the answer. Stop retrying.
+                    return Err(Fail::Error(format!(
+                        "{stage}: remotepairingdeviced closed the channel at its very first message (handshake), before any pairing identity was sent, so the refusal does not depend on the host name or key. Usual causes: pairing temporarily throttled after repeated attempts (wait 10–15 minutes or restart the iPhone, then try once), the iPhone locked during the exchange, or iOS not offering this service on this route. Attempts — {}. No file was saved.",
+                        attempts.join(" · ")
+                    )));
+                }
                 if !closed {
                     break;
                 }
@@ -464,6 +485,52 @@ async fn first_pass(provider: &EmbeddedMuxProvider, base: &str, cbs: &Callbacks)
         "{stage}: RPPairing exchange failed. Attempts — {}. The device's remotepairingdeviced closed or refused the channel; no file was saved.",
         attempts.join(" · ")
     )))
+}
+
+/// Which RPPairing message the device answered by closing.
+#[derive(Clone, Copy)]
+enum ExchangeStep {
+    Handshake,
+    PairVerify,
+    PairSetup,
+}
+
+impl ExchangeStep {
+    fn label(self) -> &'static str {
+        match self {
+            ExchangeStep::Handshake => "handshake",
+            ExchangeStep::PairVerify => "pair-verify",
+            ExchangeStep::PairSetup => "pair-setup",
+        }
+    }
+}
+
+/// Non-secret summary of the handshake answer: top-level keys, scalar flags
+/// and the peer's public identity (never deviceKVSData or key material).
+fn summarize_handshake(value: &plist::Value) -> String {
+    let Some(dict) = value.as_dictionary() else {
+        return "unexpected non-dictionary answer".into();
+    };
+    let mut parts = vec![format!("keys: {}", dict.keys().cloned().collect::<Vec<_>>().join(","))];
+    for (key, item) in dict.iter() {
+        if let Some(flag) = item.as_boolean() {
+            parts.push(format!("{key}={flag}"));
+        } else if let Some(number) = item.as_signed_integer() {
+            parts.push(format!("{key}={number}"));
+        } else if let Some(text) = item.as_string() {
+            if text.len() <= 64 {
+                parts.push(format!("{key}={text}"));
+            }
+        }
+    }
+    if let Some(info) = dict.get("peerDeviceInfo").and_then(|v| v.as_dictionary()) {
+        for key in ["name", "model", "osVersion", "buildVersion"] {
+            if let Some(text) = info.get(key).and_then(|v| v.as_string()) {
+                parts.push(format!("peer.{key}={text}"));
+            }
+        }
+    }
+    parts.join("; ")
 }
 
 // ---------------------------------------------------------------------------

@@ -210,3 +210,8 @@ Dopo una reinstallazione dell'app (o comunque quando sul dispositivo resta il re
 3. lo stesso, ancora una volta dopo una breve pausa.
 
 Si passa al tentativo successivo solo se il dispositivo chiude la connessione; un rifiuto esplicito o un timeout fermano subito. Il secondo passaggio e la verifica indipendente usano la stessa identità scelta; nessun file viene salvato se un passaggio fallisce. L'errore finale elenca tutti i tentativi con la causa reale.
+
+
+## Versione 2.4.3 — diagnostica passo per passo dello scambio RPPairing
+
+Il primo passaggio esegue ora i messaggi di `RemotePairingClient::connect` uno alla volta (handshake → pair-verify → pair-setup) e l'errore indica **in quale messaggio** remotepairingdeviced ha chiuso il canale. Se il dispositivo chiude già all'**handshake** (prima che venga inviata qualunque identità) i tentativi si fermano subito, perché cambiare nome host o chiave non può cambiare la risposta, e ripetere i tentativi può solo prolungare un eventuale blocco temporaneo. Quando l'handshake riesce, nei dettagli compare un riepilogo non segreto della risposta (chiavi, flag, nome/modello/versione del dispositivo; mai `deviceKVSData` né chiavi).
