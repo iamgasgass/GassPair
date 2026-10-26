@@ -91,7 +91,7 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
 
     static var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
     static var lockdownURL: URL { documents.appendingPathComponent("lockdown_pairing_imported.plist") }
-    static var outputURL: URL { documents.appendingPathComponent("rp_pairing_file_from_lockdown_verified.plist") }
+    static var outputURL: URL { documents.appendingPathComponent("RPPairing_new_verified.plist") }
     static var importedRPURL: URL { documents.appendingPathComponent("rp_pairing_file_imported.plist") }
     static var verifiedImportedURL: URL { documents.appendingPathComponent("rp_pairing_file_imported_usbmuxd_verified.plist") }
 
@@ -202,6 +202,7 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
             phase = .failed(message: "Import an RPPairing file first (main screen › Import / Validate RP Pairing File).")
             return
         }
+        if operation == .create { Self.resetCache() }
         launching = true
         launchGeneration += 1
         let generation = launchGeneration
@@ -334,6 +335,8 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
             let url = URL(fileURLWithPath: outcome.path)
             do {
                 try Self.protectAndValidate(url)
+                let pairingURL = try Self.writeMobileDevicePairing(from: url)
+                append("✓ Saved \(pairingURL.lastPathComponent)")
                 let what = activeOperation == .create
                     ? "New RPPairing record created through the integrated usbmuxd companion and accepted by an independent pair-verify."
                     : "The imported RPPairing record passed pair-verify on the live device; a verified copy was written."
@@ -341,6 +344,7 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
                 append("✓ Done.")
             } catch {
                 try? FileManager.default.removeItem(at: url)
+                try? FileManager.default.removeItem(at: Self.mobileDevicePairingURL(for: url))
                 phase = .failed(message: "The device verified the record but the saved file failed the local check: \(error.localizedDescription). It was removed.")
             }
             return
@@ -450,6 +454,45 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
         try RPPairingFileCheck.validate(data)
+    }
+
+    /// `<name>.plist` → `<name>.mobiledevicepairing` in the same folder.
+    nonisolated static func mobileDevicePairingURL(for plistURL: URL) -> URL {
+        plistURL.deletingPathExtension().appendingPathExtension("mobiledevicepairing")
+    }
+
+    /// Writes a byte-identical `.mobiledevicepairing` copy of a saved pairing
+    /// plist, with complete file protection, and reads it back.
+    @discardableResult
+    nonisolated static func writeMobileDevicePairing(from plistURL: URL) throws -> URL {
+        let target = mobileDevicePairingURL(for: plistURL)
+        let data = try Data(contentsOf: plistURL, options: [.mappedIfSafe])
+        try data.write(to: target, options: [.atomic])
+        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: target.path)
+        guard try Data(contentsOf: target, options: [.mappedIfSafe]) == data else {
+            try? FileManager.default.removeItem(at: target)
+            throw RPPairingFileCheck.Failure("The .mobiledevicepairing copy differs from the saved plist; it was removed.")
+        }
+        return target
+    }
+
+    /// Clears the app's caches before a new pairing: URL cache, Library/Caches,
+    /// tmp, and leftover partial writes (`*.tmp`) in Documents.
+    nonisolated static func resetCache() {
+        URLCache.shared.removeAllCachedResponses()
+        let fm = FileManager.default
+        var folders = fm.urls(for: .cachesDirectory, in: .userDomainMask)
+        folders.append(fm.temporaryDirectory)
+        for folder in folders {
+            for item in (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [] {
+                try? fm.removeItem(at: item)
+            }
+        }
+        let documents = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        for item in (try? fm.contentsOfDirectory(at: documents, includingPropertiesForKeys: nil)) ?? []
+        where item.pathExtension == "tmp" {
+            try? fm.removeItem(at: item)
+        }
     }
 
     /// Validates (structure + Ed25519 key pair) and atomically stores an

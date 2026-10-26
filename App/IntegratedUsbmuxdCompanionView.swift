@@ -142,6 +142,18 @@ struct IntegratedUsbmuxdCompanionView: View {
                 }
                 .prominentPillButton()
                 .controlSize(.large)
+                let pairingFile = IntegratedUsbmuxdCompanion.mobileDevicePairingURL(for: file)
+                if FileManager.default.fileExists(atPath: pairingFile.path) {
+                    ShareLink(item: pairingFile) {
+                        Label("Export \(pairingFile.lastPathComponent)", systemImage: "square.and.arrow.up")
+                            .font(.headline)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .prominentPillButton()
+                    .controlSize(.large)
+                }
                 Text("Also in Files › On My iPhone › GassPair.")
                     .font(.caption).foregroundStyle(.secondary)
                 secondaryButton("Create a new record", systemImage: "arrow.clockwise") {

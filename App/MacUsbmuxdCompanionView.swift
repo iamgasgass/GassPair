@@ -233,6 +233,14 @@ struct MacUsbmuxdCompanionView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .prominentPillButton()
+                let pairingFile = IntegratedUsbmuxdCompanion.mobileDevicePairingURL(for: outputURL)
+                if FileManager.default.fileExists(atPath: pairingFile.path) {
+                    ShareLink(item: pairingFile) {
+                        Label("Export verified RPPairing .mobiledevicepairing", systemImage: "square.and.arrow.up")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .prominentPillButton()
+                }
             }
         }
     }
@@ -292,6 +300,7 @@ struct MacUsbmuxdCompanionView: View {
         didVerifyRemote = false
         outputURL = nil
         defer { isBusy = false }
+        IntegratedUsbmuxdCompanion.resetCache()
         do {
             let response = try await makeClient().createRPPairing(lockdownFile: lockdownData, udid: selectedUDID)
             guard response.verified, let encoded = response.pairingFileBase64,
@@ -299,7 +308,7 @@ struct MacUsbmuxdCompanionView: View {
                 throw MacUsbmuxdCompanionError.remote("The companion did not return a verified RPPairing plist. No output was saved.")
             }
             try validateRPPairingFile(bytes)
-            let url = try saveVerifiedRPPairing(bytes, named: "rp_pairing_file_from_lockdown_verified.plist")
+            let url = try saveVerifiedRPPairing(bytes, named: "RPPairing_new_verified.plist")
             outputURL = url
             didVerifyRemote = true
             message = "\(response.message) The iPhone re-read and validated the returned plist and saved it with complete file protection."
@@ -404,6 +413,12 @@ struct MacUsbmuxdCompanionView: View {
         guard readBack == data else {
             try? FileManager.default.removeItem(at: url)
             throw MacUsbmuxdCompanionError.remote("Saved RPPairing bytes differ from the verified response; the output was deleted.")
+        }
+        do {
+            try IntegratedUsbmuxdCompanion.writeMobileDevicePairing(from: url)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
         }
         return url
     }

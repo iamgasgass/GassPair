@@ -182,7 +182,7 @@ Il companion usbmuxd ora è **dentro l'app** e fa tutto da solo. Non servono pi�
 1. trova il dispositivo provando, in ordine, l'eventuale indirizzo extra, **LocalDevVPN `10.7.0.1`** e gli indirizzi Wi‑Fi del dispositivo; il primo che accetta una sessione Lockdown autenticata col record importato vince (UDID, nome, modello e versione iOS vengono letti da Lockdown e l'UDID deve coincidere con quello del record);
 2. se il dispositivo non è raggiungibile (LocalDevVPN spento, altra rete) **riprova da solo** (5 → 30 s) e subito quando torni nell'app;
 3. apre `com.apple.dt.remotepairingdeviced.lockdown`, esegue i due passaggi upstream («Pairing through Lockdown», «Saving the pairing on the device») e poi una **terza connessione** solo per `attempt_pair_verify` + `validate_pairing`;
-4. salva `rp_pairing_file_from_lockdown_verified.plist` in modo atomico, con protezione completa e controllo della coppia Ed25519; il file è esportabile e visibile in **File › Sul mio iPhone › GassPair**.
+4. salva `RPPairing_new_verified.plist` e `RPPairing_new_verified.mobiledevicepairing` in modo atomico, con protezione completa e controllo della coppia Ed25519; il file è esportabile e visibile in **File › Sul mio iPhone › GassPair**.
 
 Se hai importato un RPPairing esistente, **Verify imported RPPairing on the device** esegue solo pair-verify (nessun PIN, nessun nuovo setup) e scrive `rp_pairing_file_imported_usbmuxd_verified.plist`.
 
