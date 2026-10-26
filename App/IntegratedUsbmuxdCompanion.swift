@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import GassPairFFI
 import UIKit
 import CryptoKit
@@ -97,6 +98,39 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
     var hasLockdown: Bool { FileManager.default.fileExists(atPath: Self.lockdownURL.path) }
     var hasImportedRP: Bool { FileManager.default.fileExists(atPath: Self.importedRPURL.path) }
     var isBusy: Bool { activeRun != 0 || launching }
+
+    /// One-line status for the main-screen card.
+    var summary: String {
+        switch phase {
+        case .needsLockdown: return "Import the Lockdown.plist to begin"
+        case .ready: return "Ready"
+        case .searching: return "Looking for the device…"
+        case .waitingForRoute: return "Waiting for LocalDevVPN / Wi-Fi…"
+        case .working: return "Pairing in progress…"
+        case .succeeded: return "Verified RPPairing ready"
+        case .failed: return "Stopped — open for details"
+        }
+    }
+
+    var statusSymbol: String {
+        switch phase {
+        case .needsLockdown: return "doc.badge.arrow.up"
+        case .ready: return "cable.connector"
+        case .searching, .working: return "arrow.triangle.2.circlepath"
+        case .waitingForRoute: return "antenna.radiowaves.left.and.right.slash"
+        case .succeeded: return "checkmark.seal.fill"
+        case .failed: return "xmark.octagon.fill"
+        }
+    }
+
+    var statusTint: Color {
+        switch phase {
+        case .succeeded: return .green
+        case .failed: return .red
+        case .waitingForRoute: return .orange
+        default: return .accentColor
+        }
+    }
 
     private var isWaitingForRoute: Bool {
         if case .waitingForRoute = phase { return true }
@@ -416,6 +450,14 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
         try RPPairingFileCheck.validate(data)
+    }
+
+    /// Validates (structure + Ed25519 key pair) and atomically stores an
+    /// existing RPPairing record for the verify-only operation.
+    static func storeImportedRP(_ data: Data) throws {
+        try RPPairingFileCheck.validate(data)
+        try data.write(to: importedRPURL, options: [.atomic])
+        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: importedRPURL.path)
     }
 
     /// Validates and stores an imported Lockdown pairing record.

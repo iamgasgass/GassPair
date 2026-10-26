@@ -1,29 +1,18 @@
 import SwiftUI
 import GassPairFFI
 import UIKit
-import CryptoKit
 import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var controller = PairingController.shared
+    @ObservedObject private var muxCompanion = IntegratedUsbmuxdCompanion.shared
     @State private var appleTVPin = ""
     @FocusState private var pinFieldFocused: Bool
-    @State private var showingRPFileImporter = false
     @State private var showingLockdownFileImporter = false
     @State private var showingIntegratedCompanion = false
     @State private var lockdownImportMessage: String?
     @State private var lockdownImportSucceeded = false
     @State private var lockdownPairingLoaded = false
-    @State private var rpImportMessage: String?
-    @State private var rpImportSucceeded = false
-    @State private var rpImportedPairingLoaded = false
-    @State private var didCheckStoredRPImport = false
-    @State private var rpEndpointHost = "10.7.0.1"
-    @State private var rpEndpointPort = "49152"
-    @State private var rpEndpointPIN = ""
-    @State private var rpRemoteBusy = false
-    @State private var rpRemoteMessage: String?
-    @State private var rpRemoteSucceeded = false
 
     var body: some View {
         ScrollView {
@@ -51,11 +40,6 @@ struct ContentView: View {
         }
         .animation(.default, value: controller.phase)
         .animation(.default, value: controller.statusLine)
-        .fileImporter(isPresented: $showingRPFileImporter,
-                      allowedContentTypes: [.propertyList, .xml, .data],
-                      allowsMultipleSelection: false) { result in
-            importAndValidateRPFile(result)
-        }
         .fileImporter(isPresented: $showingLockdownFileImporter,
                       allowedContentTypes: [.propertyList, .xml, .data],
                       allowsMultipleSelection: false) { result in
@@ -67,7 +51,6 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            refreshStoredRPImportState()
             lockdownPairingLoaded = FileManager.default.fileExists(atPath: importedLockdownFileURL.path)
         }
     }
@@ -108,128 +91,7 @@ struct ContentView: View {
                     selfPairNotice
                 }
 
-                Button {
-                    showingRPFileImporter = true
-                } label: {
-                    Label("Import / Validate RP Pairing File", systemImage: "doc.badge.gearshape")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                }
-                .pillButton()
-                .controlSize(.large)
-
-                if let rpImportMessage {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label(rpImportSucceeded ? "RP file validated locally" : "RP file not accepted",
-                              systemImage: rpImportSucceeded ? "checkmark.shield" : "exclamationmark.triangle")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(rpImportSucceeded ? .green : .orange)
-                        Text(rpImportMessage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .glassCard(cornerRadius: 16)
-                }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Create RPPairing from trusted Lockdown record")
-                        .font(.headline)
-                    Text("The usbmuxd companion is built into GassPair: no Mac needed. Import the Lockdown.plist and it finds the device by itself (LocalDevVPN 10.7.0.1 or Wi-Fi), opens RemotePairingLockdownService, creates the record and saves it only after an independent pair-verify.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Button {
-                        showingLockdownFileImporter = true
-                    } label: {
-                        Label(lockdownPairingLoaded ? "Replace imported Lockdown.plist" : "Import Lockdown.plist", systemImage: "doc.badge.arrow.up")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .pillButton()
-                    Button {
-                        showingIntegratedCompanion = true
-                    } label: {
-                        Label("Open integrated usbmuxd companion", systemImage: "cable.connector")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .pillButton()
-                    .disabled(rpRemoteBusy)
-                    if let lockdownImportMessage {
-                        Text(lockdownImportMessage).font(.caption).textSelection(.enabled)
-                            .foregroundStyle(lockdownImportSucceeded ? .green : .orange)
-                    }
-                }
-                .padding().glassCard(cornerRadius: 16)
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Remote RPPairing endpoint")
-                        .font(.headline)
-                    Text("Enter the actual RPPairing service address advertised by the target. LocalDevVPN's Lockdown port 62078 is not an RPPairing endpoint.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    TextField("Host / IP", text: $rpEndpointHost)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .textFieldStyle(.roundedBorder)
-                    TextField("RPPairing port", text: $rpEndpointPort)
-                        .keyboardType(.numberPad).textFieldStyle(.roundedBorder)
-                    if rpImportedPairingLoaded {
-                        Label("Existing RPPairing record loaded — PIN not required", systemImage: "key.fill")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.green)
-                        Text("The imported plist contains the pairing identity keys, identifier and alt_irk; it does not contain the six-digit setup PIN. For an existing record, GassPair skips pair-setup and runs real pair-verify against the endpoint, then saves a verified copy. No PIN is requested or guessed.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button {
-                            verifyImportedRPPairingAndSave()
-                        } label: {
-                            if rpRemoteBusy { ProgressView().frame(maxWidth: .infinity) }
-                            else { Label("Verify imported + pair-verify + save", systemImage: "checkmark.shield").frame(maxWidth: .infinity) }
-                        }
-                        .pillButton()
-                        .disabled(rpRemoteBusy || rpEndpointHost.trimmingCharacters(in: .whitespaces).isEmpty || UInt16(rpEndpointPort) == nil || !FileManager.default.fileExists(atPath: importedRPFileURL.path))
-
-                        Button("Create a new pairing instead (PIN required)") {
-                            rpImportedPairingLoaded = false
-                            rpEndpointPIN = ""
-                            rpRemoteMessage = "New pairing mode selected. Enter the six-digit PIN supplied by the remote pairing service."
-                            rpRemoteSucceeded = false
-                        }
-                        .font(.caption)
-                        .disabled(rpRemoteBusy)
-                    } else {
-                        SecureField("6-digit pairing PIN (new pairing only)", text: $rpEndpointPIN)
-                            .keyboardType(.numberPad).textFieldStyle(.roundedBorder)
-                            .onChange(of: rpEndpointPIN) { value in
-                                rpEndpointPIN = String(value.filter(\.isNumber).prefix(6))
-                            }
-                        Text("The PIN is a short-lived pair-setup code, not a field in an existing RPPairing plist. It must come from the remote service only when creating a new record.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button {
-                            createRemoteRPPairing()
-                        } label: {
-                            if rpRemoteBusy { ProgressView().frame(maxWidth: .infinity) }
-                            else { Label("Create new + pair-verify + save", systemImage: "key.horizontal").frame(maxWidth: .infinity) }
-                        }
-                        .pillButton().disabled(rpRemoteBusy || rpEndpointHost.trimmingCharacters(in: .whitespaces).isEmpty || UInt16(rpEndpointPort) == nil || rpEndpointPIN.count != 6)
-                        if FileManager.default.fileExists(atPath: importedRPFileURL.path) {
-                            Button {
-                                rpImportedPairingLoaded = true
-                                rpEndpointPIN = ""
-                                rpRemoteMessage = "Existing imported record selected. Pair-verify does not require the setup PIN."
-                                rpRemoteSucceeded = false
-                            } label: {
-                                Label("Use imported record (no PIN)", systemImage: "doc.badge.gearshape").frame(maxWidth: .infinity)
-                            }
-                            .pillButton()
-                            .disabled(rpRemoteBusy)
-                        }
-                    }
-                    if let rpRemoteMessage {
-                        Text(rpRemoteMessage).font(.caption).textSelection(.enabled)
-                            .foregroundStyle(rpRemoteSucceeded ? .green : .orange)
-                    }
-                }
-                .padding().glassCard(cornerRadius: 16)
+                integratedUsbmuxdCard
 
                 if let last = controller.lastPairing {
                     lastPairingCard(last)
@@ -435,56 +297,55 @@ struct ContentView: View {
         }
     }
 
-    private func createRemoteRPPairing() {
-        guard let port = UInt16(rpEndpointPort), rpEndpointPIN.count == 6 else { return }
-        rpRemoteBusy = true; rpRemoteMessage = "Connecting to the RPPairing service…"; rpRemoteSucceeded = false
-        let host = rpEndpointHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        let pin = rpEndpointPIN
-        let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("rp_pairing_file_remote_verified.plist").path
-        DispatchQueue.global(qos: .userInitiated).async {
-            var result = GassPairResult()
-            let rc = host.withCString { h in
-                "GassPair".withCString { n in pin.withCString { p in output.withCString { o in
-                    gasspair_create_rp_endpoint(h, port, n, p, o, &result)
-                } } }
+    private var integratedUsbmuxdCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Image(systemName: muxCompanion.statusSymbol)
+                    .font(.title3)
+                    .foregroundStyle(muxCompanion.statusTint)
+                    .frame(width: 44, height: 44)
+                    .glassCircle()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("usbmuxd (integrated)")
+                        .font(.headline)
+                    Text(muxCompanion.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
             }
-            let message: String
-            if rc == 0 {
-                message = "Pair-setup and pair-verify succeeded. Verified RPPairing record saved to Documents/rp_pairing_file_remote_verified.plist."
-            } else if let error = result.error {
-                message = String(cString: error)
-            } else {
-                message = "RPPairing creation failed (code \(rc))."
+            Text("Built into GassPair, no Mac needed. Import the Lockdown.plist: the device is found, the RPPairing record is created and independently verified automatically.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                showingIntegratedCompanion = true
+            } label: {
+                Label("Open usbmuxd (integrated)", systemImage: "cable.connector")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
             }
-            DispatchQueue.main.async {
-                rpRemoteBusy = false; rpRemoteSucceeded = rc == 0; rpRemoteMessage = message
-                if rc == 0 { rpEndpointPIN = ""; rpImportedPairingLoaded = false }
+            .prominentPillButton()
+            .controlSize(.large)
+            Button {
+                showingLockdownFileImporter = true
+            } label: {
+                Label(lockdownPairingLoaded ? "Replace Lockdown.plist" : "Import Lockdown.plist",
+                      systemImage: "doc.badge.arrow.up")
+                    .frame(maxWidth: .infinity)
             }
-            gasspair_result_free(&result)
-        }
-    }
-
-    private var importedRPFileURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("rp_pairing_file_imported.plist")
-    }
-
-    private var verifiedImportedRPFileURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("rp_pairing_file_imported_verified.plist")
-    }
-
-    private func refreshStoredRPImportState() {
-        guard !didCheckStoredRPImport else { return }
-        didCheckStoredRPImport = true
-        if FileManager.default.fileExists(atPath: importedRPFileURL.path) {
-            rpImportedPairingLoaded = true
-            if rpImportMessage == nil {
-                rpImportSucceeded = true
-                rpImportMessage = "An imported RPPairing record was found in Documents. Its PIN is not stored in the plist; select the endpoint and run pair-verify without a PIN."
+            .pillButton()
+            .disabled(muxCompanion.isBusy)
+            if let lockdownImportMessage {
+                Text(lockdownImportMessage)
+                    .font(.caption)
+                    .foregroundStyle(lockdownImportSucceeded ? .green : .orange)
+                    .textSelection(.enabled)
             }
         }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassCard(cornerRadius: 20)
     }
 
     private var importedLockdownFileURL: URL {
@@ -511,128 +372,6 @@ struct ContentView: View {
         }
     }
 
-
-    /// An existing RPPairing record does not contain the transient pair-setup PIN.
-    /// Verify the imported identity against the real endpoint, and publish a separate
-    /// verified copy only after the network pair-verify passes.
-    private func verifyImportedRPPairingAndSave() {
-        guard let port = UInt16(rpEndpointPort) else { return }
-        let inputURL = importedRPFileURL
-        let outputURL = verifiedImportedRPFileURL
-        guard FileManager.default.fileExists(atPath: inputURL.path) else {
-            rpImportedPairingLoaded = false
-            rpRemoteSucceeded = false
-            rpRemoteMessage = "Import a valid RPPairing file first. A missing file cannot provide pairing credentials or a PIN."
-            return
-        }
-        rpRemoteBusy = true
-        rpRemoteMessage = "Running remote pair-verify with the imported record; no setup PIN is needed…"
-        rpRemoteSucceeded = false
-        let host = rpEndpointHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        let inputPath = inputURL.path
-        DispatchQueue.global(qos: .userInitiated).async {
-            var result = GassPairResult()
-            let rc = host.withCString { h in "GassPair".withCString { n in inputPath.withCString { f in
-                gasspair_verify_rp_endpoint(h, port, n, f, &result)
-            } } }
-            let backendMessage: String
-            if rc == 0 { backendMessage = "Remote pair-verify and pairing validation succeeded." }
-            else if let error = result.error { backendMessage = String(cString: error) }
-            else { backendMessage = "Remote pair-verify failed (code \(rc))." }
-            gasspair_result_free(&result)
-
-            var saveError: String?
-            if rc == 0 {
-                do {
-                    let sourceData = try Data(contentsOf: inputURL, options: [.mappedIfSafe])
-                    try sourceData.write(to: outputURL, options: [.atomic])
-                    let readBack = try Data(contentsOf: outputURL, options: [.mappedIfSafe])
-                    guard readBack == sourceData else {
-                        throw RPImportError.invalid("The verified copy did not match the imported record after read-back.")
-                    }
-                    try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: outputURL.path)
-                } catch {
-                    saveError = "Pair-verify succeeded, but the verified copy could not be safely saved: \(error.localizedDescription)"
-                }
-            }
-            DispatchQueue.main.async {
-                rpRemoteBusy = false
-                if let saveError {
-                    rpRemoteSucceeded = false
-                    rpRemoteMessage = saveError
-                } else if rc == 0 {
-                    rpRemoteSucceeded = true
-                    rpRemoteMessage = "\(backendMessage) Imported file verified against the live endpoint and saved to Documents/rp_pairing_file_imported_verified.plist. No six-digit PIN was needed or extracted."
-                } else {
-                    rpRemoteSucceeded = false
-                    rpRemoteMessage = backendMessage + " No verified copy was written."
-                }
-            }
-        }
-    }
-
-    /// Imports an existing RPPairing plist without inventing credentials.
-    /// This is a local structural/key-consistency check, NOT network pair-verify.
-    private func importAndValidateRPFile(_ result: Result<[URL], Error>) {
-        do {
-            guard let source = try result.get().first else { return }
-            let scoped = source.startAccessingSecurityScopedResource()
-            defer { if scoped { source.stopAccessingSecurityScopedResource() } }
-            let data = try Data(contentsOf: source, options: [.mappedIfSafe])
-            guard data.count <= 1_048_576 else {
-                throw RPImportError.invalid("The selected file is larger than 1 MiB.")
-            }
-            guard let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
-                throw RPImportError.invalid("The file is not a property-list dictionary.")
-            }
-            guard let publicKey = plist["public_key"] as? Data,
-                  let privateKey = plist["private_key"] as? Data,
-                  let identifier = plist["identifier"] as? String,
-                  let altIRK = plist["alt_irk"] as? Data else {
-                throw RPImportError.invalid("Required fields are missing: public_key, private_key, identifier, alt_irk.")
-            }
-            guard publicKey.count == 32, privateKey.count == 32 else {
-                throw RPImportError.invalid("public_key and private_key must each contain 32 bytes.")
-            }
-            guard altIRK.count == 16 else {
-                throw RPImportError.invalid("alt_irk must contain 16 bytes.")
-            }
-            guard UUID(uuidString: identifier) != nil else {
-                throw RPImportError.invalid("identifier is not a valid UUID.")
-            }
-            let privateKeyObject = try Curve25519.Signing.PrivateKey(rawRepresentation: privateKey)
-            guard privateKeyObject.publicKey.rawRepresentation == publicKey else {
-                throw RPImportError.invalid("public_key does not match the public key derived from private_key.")
-            }
-
-            let destination = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("rp_pairing_file_imported.plist")
-            let temporary = destination.appendingPathExtension("tmp")
-            try data.write(to: temporary, options: [.atomic])
-            if FileManager.default.fileExists(atPath: destination.path) {
-                _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
-            } else {
-                try FileManager.default.moveItem(at: temporary, to: destination)
-            }
-            rpImportSucceeded = true
-            rpImportedPairingLoaded = true
-            rpEndpointPIN = ""
-            rpRemoteMessage = "Imported RPPairing identity selected. The plist has no six-digit setup PIN, so GassPair will verify the existing keys instead of starting a new pair-setup."
-            rpRemoteSucceeded = false
-            rpImportMessage = "Local structure and key consistency passed. Imported as rp_pairing_file_imported.plist. A six-digit PIN is not part of an RPPairing file; use Verify imported + pair-verify + save to validate this record against the live endpoint without a PIN."
-        } catch {
-            rpImportSucceeded = false
-            rpImportMessage = error.localizedDescription
-        }
-    }
-
-    private enum RPImportError: LocalizedError {
-        case invalid(String)
-        var errorDescription: String? {
-            if case .invalid(let message) = self { return message }
-            return "Invalid RPPairing file."
-        }
-    }
 
     private var cancelButton: some View {
         Button("Cancel", role: .cancel) { controller.cancel() }

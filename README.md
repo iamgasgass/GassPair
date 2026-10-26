@@ -191,3 +191,11 @@ Se hai importato un RPPairing esistente, **Verify imported RPPairing on the devi
 **Limiti onesti:** se una build di iOS offre questo servizio solo su USB, lockdownd rifiuta `StartService` su qualunque percorso di rete (anche il Mac con iPhone in Wi‑Fi): l'app lo dice esplicitamente e in quel caso resta come ripiego facoltativo il companion macOS con il **cavo USB** (*Mac companion (optional fallback)*). Ogni errore indica la fase esatta e la causa I/O reale; nessun file viene salvato se un passaggio fallisce. Il flusso end-to-end va confermato su un dispositivo reale.
 
 API FFI nuove: `gasspair_mux_probe`, `gasspair_mux_create_rppairing`, `gasspair_mux_verify_rppairing` (stati 40–48 e 60–62). `gasspair_create_rp_from_lockdown_endpoint` resta per compatibilità e ora usa il motore integrato.
+
+
+## Versione 2.4.1 — interfaccia Liquid Glass per usbmuxd (integrated)
+
+- Rimosse dalla schermata principale le schede **Import / Validate RP Pairing File** e **Remote RPPairing endpoint** (con i relativi campi host/porta/PIN). Al loro posto c'è la sola scheda **usbmuxd (integrated)**, che mostra lo stato in tempo reale e permette di aprire il companion o importare il `Lockdown.plist`.
+- L'import e la verifica di un RPPairing esistente ora sono dentro **usbmuxd (integrated)** › *Existing RPPairing* (stessi controlli: campi, lunghezze, UUID, `alt_irk`, coppia Ed25519; la verifica è solo pair-verify sul dispositivo, senza PIN).
+- La schermata **usbmuxd (integrated)** e il ripiego **Mac companion** sono stati riscritti interamente con card Liquid Glass native (`glassEffect`, `.glass` / `.glassProminent`, `GlassEffectContainer` su iOS 26+; materiali traslucidi da iOS 16 a 25), con gli stessi modificatori del resto dell'app (`glassCard`, `pillButton`, `glassCapsule`) più `GlassComponents.swift`.
+- Le funzioni FFI `gasspair_create_rp_endpoint` / `gasspair_verify_rp_endpoint` restano nella libreria per compatibilità, ma l'app non le usa più.

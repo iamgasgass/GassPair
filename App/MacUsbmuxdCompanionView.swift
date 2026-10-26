@@ -35,154 +35,23 @@ struct MacUsbmuxdCompanionView: View {
     private let initialLockdownFileURL: URL?
 
     var body: some View {
-        Form {
-            Section("macOS usbmuxd companion") {
-                Text("The Mac companion performs the private device-service open through macOS usbmuxd. The iPhone sends the request through LocalDevVPN over pinned HTTPS; it never pretends raw TCP is a usbmuxd provider.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-
-                TextField("Mac LocalDevVPN/LAN IP", text: $companionHost)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
-                    .disabled(isBusy)
-                TextField("Companion TCP port", text: $companionPort)
-                    .keyboardType(.numberPad)
-                    .disabled(isBusy)
-                TextField("TLS certificate SHA-256 fingerprint", text: $companionFingerprint)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .disabled(isBusy)
-                SecureField("Companion access token", text: $companionToken)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .disabled(isBusy)
-
-                Text("On the Mac, start gasspair-usbmuxd-companion bound to its actual LocalDevVPN/LAN IP. Copy the displayed SHA-256 certificate fingerprint and the access token from the Mac's secure token file. Never disable certificate pinning.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Button {
-                    Task { await refreshDevices() }
-                } label: {
-                    if isBusy && currentOperation == "List devices" {
-                        ProgressView(currentOperation)
-                    } else {
-                        Label("Connect securely and list usbmuxd devices", systemImage: "network")
-                    }
+        ScrollView {
+            GlassGroup(spacing: 20) {
+                VStack(spacing: 20) {
+                    connectionCard
+                    targetCard
+                    lockdownCard
+                    createCard
+                    verifyCard
+                    if isBusy || message != nil { resultCard }
+                    requirementsCard
                 }
-                .disabled(isBusy || !connectionSettingsLookValid)
-            }
-
-            Section("Target device") {
-                if devices.isEmpty {
-                    Text("No device list loaded. Connect to the Mac companion and refresh.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Picker("Device UDID", selection: $selectedUDID) {
-                        Text("Select a device").tag("")
-                        ForEach(devices) { device in
-                            Text("\(device.udid) · \(device.transport)").tag(device.udid)
-                        }
-                    }
-                    .disabled(isBusy)
-                }
-                Text("The selected iPhone must already be visible to the Mac's usbmuxd over Wi-Fi/network. This helper uses that native device provider and the imported Lockdown trust record.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Imported Lockdown trust") {
-                Button {
-                    showingLockdownImporter = true
-                } label: {
-                    Label(lockdownData == nil ? "Import Lockdown.plist" : "Replace Lockdown.plist (\(lockdownName ?? "imported"))", systemImage: "doc.badge.arrow.up")
-                }
-                .disabled(isBusy)
-
-                if let lockdownData {
-                    Label("Lockdown trust loaded · \(ByteCountFormatter.string(fromByteCount: Int64(lockdownData.count), countStyle: .file))", systemImage: "checkmark.shield.fill")
-                        .foregroundStyle(.green)
-                    Text("The file is kept in memory in this view and sent only over TLS after certificate pinning and access-token authentication. The companion verifies that it opens an authenticated Lockdown session for the selected UDID.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Import the genuine Lockdown pairing record already trusted for this exact iPhone. A structural plist alone is not enough; the helper verifies its TLS session against the selected device.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Section("Create a new RPPairing record") {
-                Button {
-                    Task { await createRPPairing() }
-                } label: {
-                    if isBusy && currentOperation == "Create RPPairing" {
-                        ProgressView("Using usbmuxd · pair-setup · pair-verify…")
-                    } else {
-                        Label("Create + pair-verify + save via usbmuxd", systemImage: "key.horizontal")
-                    }
-                }
-                .disabled(isBusy || !connectionSettingsLookValid || lockdownData == nil || selectedUDID.isEmpty)
-
-                Text("The Mac companion opens RemotePairingLockdownService through usbmuxd, creates the real RpPairingFile, then opens a fresh service connection and runs attemptPairVerify + validatePairing. It returns no file unless verification succeeds.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Verify an existing RPPairing file") {
-                Button {
-                    showingRPImporter = true
-                } label: {
-                    Label(rpData == nil ? "Import existing RPPairing.plist" : "Replace RPPairing.plist (\(rpName ?? "imported"))", systemImage: "doc.badge.gearshape")
-                }
-                .disabled(isBusy)
-                Button {
-                    Task { await verifyImportedRPPairing() }
-                } label: {
-                    if isBusy && currentOperation == "Verify RPPairing" {
-                        ProgressView("Running remote pair-verify…")
-                    } else {
-                        Label("Verify imported record against the real device", systemImage: "checkmark.shield")
-                    }
-                }
-                .disabled(isBusy || !connectionSettingsLookValid || lockdownData == nil || rpData == nil || selectedUDID.isEmpty)
-            }
-
-            if isBusy || message != nil {
-                Section("Operation result") {
-                    if isBusy { ProgressView(currentOperation) }
-                    Text(message ?? "Preparing the operation…")
-                        .font(.footnote)
-                        .textSelection(.enabled)
-                    if isBusy {
-                        Text("The pairing plist contains private key material. Keep the app open and do not share screenshots or diagnostic text containing secrets.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if didVerifyRemote, let outputURL {
-                        Label("Pairing verified against the live device", systemImage: "checkmark.seal.fill")
-                            .foregroundStyle(.green)
-                        ShareLink(item: outputURL) {
-                            Label("Export verified RPPairing plist", systemImage: "square.and.arrow.up")
-                        }
-                    }
-                }
-            }
-
-            Section("Requirements / safety") {
-                Label("Wi-Fi/network device appears in the Mac's usbmuxd device list", systemImage: "1.circle")
-                Label("Imported Lockdown record successfully starts TLS for the selected UDID", systemImage: "2.circle")
-                Label("Mac companion certificate fingerprint matches exactly", systemImage: "3.circle")
-                Label("RPPairing output is returned only after independent pair-verify", systemImage: "4.circle")
-                Text("LocalDevVPN transports packets but does not implement usbmuxd. This helper runs the usbmuxd-backed part on macOS, then transfers the verified record to GassPair through pinned TLS plus an access token. If the device is not visible to macOS usbmuxd, this operation stops without creating a file.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                .frame(maxWidth: 520)
+                .padding()
+                .frame(maxWidth: .infinity)
             }
         }
-        .navigationTitle("usbmuxd RPPairing")
+        .navigationTitle("Mac companion")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -201,6 +70,182 @@ struct MacUsbmuxdCompanionView: View {
             loadRPFile(result)
         }
         .onAppear(perform: loadInitialLockdownFile)
+    }
+
+    // MARK: - Glass cards
+
+    private var connectionCard: some View {
+        GlassSection("macOS usbmuxd companion", systemImage: "desktopcomputer",
+                     footer: "On the Mac, start gasspair-usbmuxd-companion bound to its actual LocalDevVPN/LAN IP. Copy the displayed SHA-256 certificate fingerprint and the access token from the Mac's secure token file. Never disable certificate pinning.") {
+            Text("Optional fallback. The Mac companion performs the private device-service open through macOS usbmuxd; the iPhone talks to it over pinned HTTPS.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("Mac LocalDevVPN/LAN IP", text: $companionHost)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+                .glassField()
+                .disabled(isBusy)
+            TextField("Companion TCP port", text: $companionPort)
+                .keyboardType(.numberPad)
+                .glassField()
+                .disabled(isBusy)
+            TextField("TLS certificate SHA-256 fingerprint", text: $companionFingerprint)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .glassField()
+                .disabled(isBusy)
+            SecureField("Companion access token", text: $companionToken)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .glassField()
+                .disabled(isBusy)
+            Button {
+                Task { await refreshDevices() }
+            } label: {
+                Group {
+                    if isBusy && currentOperation == "List devices" {
+                        ProgressView(currentOperation)
+                    } else {
+                        Label("Connect securely and list usbmuxd devices", systemImage: "network")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .prominentPillButton()
+            .disabled(isBusy || !connectionSettingsLookValid)
+        }
+    }
+
+    private var targetCard: some View {
+        GlassSection("Target device", systemImage: "iphone",
+                     footer: "The selected iPhone must already be visible to the Mac's usbmuxd. This helper uses that native device provider and the imported Lockdown trust record.") {
+            if devices.isEmpty {
+                Text("No device list loaded. Connect to the Mac companion and refresh.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                Picker("Device UDID", selection: $selectedUDID) {
+                    Text("Select a device").tag("")
+                    ForEach(devices) { device in
+                        Text("\(device.udid) · \(device.transport)").tag(device.udid)
+                    }
+                }
+                .pickerStyle(.menu)
+                .padding(.horizontal, 8)
+                .glassCapsule()
+                .disabled(isBusy)
+            }
+        }
+    }
+
+    private var lockdownCard: some View {
+        GlassSection("Imported Lockdown trust", systemImage: "lock.shield") {
+            Button {
+                showingLockdownImporter = true
+            } label: {
+                Label(lockdownData == nil ? "Import Lockdown.plist" : "Replace Lockdown.plist (\(lockdownName ?? "imported"))", systemImage: "doc.badge.arrow.up")
+                    .frame(maxWidth: .infinity)
+            }
+            .pillButton()
+            .disabled(isBusy)
+            if let lockdownData {
+                Label("Lockdown trust loaded · \(ByteCountFormatter.string(fromByteCount: Int64(lockdownData.count), countStyle: .file))", systemImage: "checkmark.shield.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(.green)
+                Text("Kept in memory and sent only over TLS after certificate pinning and access-token authentication. The companion verifies that it opens an authenticated Lockdown session for the selected UDID.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Import the genuine Lockdown pairing record already trusted for this exact iPhone.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var createCard: some View {
+        GlassSection("Create a new RPPairing record", systemImage: "key.horizontal",
+                     footer: "The Mac companion opens RemotePairingLockdownService through usbmuxd, creates the RpPairingFile, then runs attemptPairVerify + validatePairing on a fresh connection. No file is returned unless verification succeeds.") {
+            Button {
+                Task { await createRPPairing() }
+            } label: {
+                Group {
+                    if isBusy && currentOperation == "Create RPPairing" {
+                        ProgressView("Using usbmuxd · pair-setup · pair-verify…")
+                    } else {
+                        Label("Create + pair-verify + save via usbmuxd", systemImage: "key.horizontal")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .prominentPillButton()
+            .disabled(isBusy || !connectionSettingsLookValid || lockdownData == nil || selectedUDID.isEmpty)
+        }
+    }
+
+    private var verifyCard: some View {
+        GlassSection("Verify an existing RPPairing file", systemImage: "checkmark.shield") {
+            Button {
+                showingRPImporter = true
+            } label: {
+                Label(rpData == nil ? "Import existing RPPairing.plist" : "Replace RPPairing.plist (\(rpName ?? "imported"))", systemImage: "doc.badge.gearshape")
+                    .frame(maxWidth: .infinity)
+            }
+            .pillButton()
+            .disabled(isBusy)
+            Button {
+                Task { await verifyImportedRPPairing() }
+            } label: {
+                Group {
+                    if isBusy && currentOperation == "Verify RPPairing" {
+                        ProgressView("Running remote pair-verify…")
+                    } else {
+                        Label("Verify imported record against the real device", systemImage: "checkmark.shield")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .pillButton()
+            .disabled(isBusy || !connectionSettingsLookValid || lockdownData == nil || rpData == nil || selectedUDID.isEmpty)
+        }
+    }
+
+    private var resultCard: some View {
+        GlassSection("Operation result", systemImage: "info.circle") {
+            if isBusy { ProgressView(currentOperation) }
+            Text(message ?? "Preparing the operation…")
+                .font(.footnote)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            if isBusy {
+                Text("The pairing plist contains private key material. Keep the app open and do not share screenshots or diagnostic text containing secrets.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if didVerifyRemote, let outputURL {
+                Label("Pairing verified against the live device", systemImage: "checkmark.seal.fill")
+                    .foregroundStyle(.green)
+                ShareLink(item: outputURL) {
+                    Label("Export verified RPPairing plist", systemImage: "square.and.arrow.up")
+                        .frame(maxWidth: .infinity)
+                }
+                .prominentPillButton()
+            }
+        }
+    }
+
+    private var requirementsCard: some View {
+        GlassSection("Requirements / safety", systemImage: "checklist",
+                     footer: "This helper runs the usbmuxd-backed part on macOS, then transfers the verified record to GassPair through pinned TLS plus an access token. If the device is not visible to macOS usbmuxd, the operation stops without creating a file.") {
+            Label("Device appears in the Mac's usbmuxd device list", systemImage: "1.circle")
+            Label("Imported Lockdown record starts TLS for the selected UDID", systemImage: "2.circle")
+            Label("Mac companion certificate fingerprint matches exactly", systemImage: "3.circle")
+            Label("RPPairing output is returned only after independent pair-verify", systemImage: "4.circle")
+        }
+        .font(.subheadline)
     }
 
     private var connectionSettingsLookValid: Bool {

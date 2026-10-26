@@ -34,7 +34,7 @@ checks = {
     "result carries endpoint and iOS version": "char *endpoint;" in header and "char *os_version;" in header and "(*r).endpoint" in rust,
     "legacy entry point delegates to integrated engine": "gasspair_mux_create_rppairing(session, host" in rust,
     # Swift
-    "main screen opens the integrated companion": "showingIntegratedCompanion = true" in swift and "Open integrated usbmuxd companion" in swift,
+    "main screen opens the integrated companion": "showingIntegratedCompanion = true" in swift and "Open usbmuxd (integrated)" in swift,
     "Lockdown import starts the companion automatically": "IntegratedUsbmuxdCompanion.shared.lockdownImported()" in swift,
     "no manual host/fingerprint/token/UDID fields in integrated view": not any(k in view for k in ("SecureField", "fingerprint", "Device UDID\"")),
     "automatic retry while the route is down": "scheduleRetry" in engine and "waitingForRoute" in engine,
@@ -42,8 +42,10 @@ checks = {
     "output is protected and re-validated": "FileProtectionType.complete" in engine and "RPPairingFileCheck.validate" in engine,
     "no obsolete iOS raw-TCP pairing job is present": not (root / "App/LockdownRPPairingJob.swift").exists(),
     # Optional Mac fallback still intact
-    "Mac companion kept as optional fallback": "Mac companion (optional fallback)" in view and "self.inner.connect(port)" in companion,
+    "Mac companion kept as optional fallback": "Optional fallback" in view and "self.inner.connect(port)" in companion,
     "docs describe the integrated companion": "integrated" in docs.lower() and "10.7.0.1" in docs,
+    "integrated screen is fully glass (no Form)": "Form {" not in view and "glassCard(" in view and "GlassSection(" in view,
+    "Mac fallback screen is glass too": "Form {" not in (root / "App/MacUsbmuxdCompanionView.swift").read_text(),
     "README documents 2.4.0": "2.4.0" in readme and "Companion usbmuxd integrato" in readme,
 }
 failed = False
