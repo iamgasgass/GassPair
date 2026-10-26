@@ -215,10 +215,3 @@ Si passa al tentativo successivo solo se il dispositivo chiude la connessione; u
 ## Versione 2.4.3 — diagnostica passo per passo dello scambio RPPairing
 
 Il primo passaggio esegue ora i messaggi di `RemotePairingClient::connect` uno alla volta (handshake → pair-verify → pair-setup) e l'errore indica **in quale messaggio** remotepairingdeviced ha chiuso il canale. Se il dispositivo chiude già all'**handshake** (prima che venga inviata qualunque identità) i tentativi si fermano subito, perché cambiare nome host o chiave non può cambiare la risposta, e ripetere i tentativi può solo prolungare un eventuale blocco temporaneo. Quando l'handshake riesce, nei dettagli compare un riepilogo non segreto della risposta (chiavi, flag, nome/modello/versione del dispositivo; mai `deviceKVSData` né chiavi).
-
-
-## Versione 2.4.4 — niente tentativi a raffica quando l'iPhone rifiuta l'handshake
-
-- Corretto: riaprire la schermata **usbmuxd (integrated)** dopo un errore la riportava a «Ready» e la modalità automatica faceva subito un nuovo tentativo. Se `remotepairingdeviced` sta limitando i tentativi, ogni apertura allungava il blocco. Ora un errore resta sullo schermo e non riparte da solo.
-- Se il dispositivo chiude il canale già all'**handshake**, i tentativi automatici si fermano per 15 minuti (poi 30, poi 60 se si ripete), con conto alla rovescia; la pausa resta valida anche chiudendo l'app. Finita la pausa parte **un solo** tentativo automatico; **Try once now** permette di provare subito a mano. Un successo azzera il contatore.
-- La scheda suggerisce cosa fare (riavviare l'iPhone, sbloccarlo, LocalDevVPN attivo, schermo acceso) e ricorda che un RPPairing esportato da un'esecuzione riuscita in precedenza resta valido: si può importare in *Existing RPPairing* invece di crearne uno nuovo.

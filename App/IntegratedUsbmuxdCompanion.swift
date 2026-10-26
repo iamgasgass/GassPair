@@ -40,10 +40,6 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
         case succeeded(file: URL, message: String)
         /// Stopped after the device was reached (no automatic retry).
         case failed(message: String)
-        /// remotepairingdeviced closed the channel at the handshake: no
-        /// automatic attempt until `until`, so repeated tries can't prolong a
-        /// throttle on the device.
-        case coolingDown(until: Date, message: String)
     }
 
     enum Job { case create, verifyImported }
@@ -64,9 +60,6 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
     private enum Keys {
         static let automatic = "gasspair.mux.automatic"
         static let extraEndpoints = "gasspair.mux.extraEndpoints"
-        static let cooldownUntil = "gasspair.mux.cooldownUntil"
-        static let cooldownMessage = "gasspair.mux.cooldownMessage"
-        static let handshakeRefusals = "gasspair.mux.handshakeRefusals"
     }
 
     private let localNetwork = LocalNetworkAuthorization()
@@ -81,7 +74,6 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
     private var activeOperation: Job = .create
     private var attachedThisRun = false
     private var retryTask: Task<Void, Never>?
-    private var cooldownTask: Task<Void, Never>?
     private var consecutiveRouteFailures = 0
     private var isPresented = false
     /// Set when a new Lockdown.plist arrives while the screen is closed.
@@ -117,8 +109,6 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
         case .working: return "Pairing in progress…"
         case .succeeded: return "Verified RPPairing ready"
         case .failed: return "Stopped — open for details"
-        case .coolingDown(let until, _):
-            return "Paused until \(until.formatted(date: .omitted, time: .shortened)) — device refused pairing"
         }
     }
 
@@ -130,7 +120,6 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
         case .waitingForRoute: return "antenna.radiowaves.left.and.right.slash"
         case .succeeded: return "checkmark.seal.fill"
         case .failed: return "xmark.octagon.fill"
-        case .coolingDown: return "hourglass"
         }
     }
 
@@ -138,15 +127,8 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
         switch phase {
         case .succeeded: return .green
         case .failed: return .red
-        case .waitingForRoute, .coolingDown: return .orange
+        case .waitingForRoute: return .orange
         default: return .accentColor
-        }
-    }
-
-    private var isStopped: Bool {
-        switch phase {
-        case .failed, .coolingDown: return true
-        default: return false
         }
     }
 
@@ -160,82 +142,20 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
         if FileManager.default.fileExists(atPath: outputURL.path) {
             return .succeeded(file: outputURL, message: "A verified RPPairing record created by the integrated companion is ready.")
         }
-        if let cooldown = activeCooldown() {
-            return .coolingDown(until: cooldown.until, message: cooldown.message)
-        }
         return .ready
-    }
-
-    // MARK: - Handshake cooldown
-
-    /// Cooldown persisted across launches (not across reinstalls).
-    private static func activeCooldown() -> (until: Date, message: String)? {
-        let defaults = UserDefaults.standard
-        let until = Date(timeIntervalSince1970: defaults.double(forKey: Keys.cooldownUntil))
-        guard until > Date() else { return nil }
-        return (until, defaults.string(forKey: Keys.cooldownMessage) ?? "")
-    }
-
-    /// 15 → 30 → 60 minutes for consecutive refusals at the handshake.
-    private func beginCooldown(message: String) {
-        let defaults = UserDefaults.standard
-        let refusals = defaults.integer(forKey: Keys.handshakeRefusals) + 1
-        defaults.set(refusals, forKey: Keys.handshakeRefusals)
-        let minutes = min(15 << min(refusals - 1, 2), 60)
-        let until = Date().addingTimeInterval(TimeInterval(minutes * 60))
-        defaults.set(until.timeIntervalSince1970, forKey: Keys.cooldownUntil)
-        defaults.set(message, forKey: Keys.cooldownMessage)
-        phase = .coolingDown(until: until, message: message)
-        append("Pausing automatic attempts for \(minutes) min so the device's pairing service can recover.")
-        scheduleCooldownEnd()
-    }
-
-    private func clearCooldown() {
-        let defaults = UserDefaults.standard
-        defaults.removeObject(forKey: Keys.cooldownUntil)
-        defaults.removeObject(forKey: Keys.cooldownMessage)
-        defaults.removeObject(forKey: Keys.handshakeRefusals)
-        cooldownTask?.cancel()
-        cooldownTask = nil
-    }
-
-    /// When the pause is over and the screen is open in automatic mode, make
-    /// exactly one new attempt.
-    private func scheduleCooldownEnd() {
-        cooldownTask?.cancel()
-        guard case .coolingDown(let until, _) = phase else { return }
-        cooldownTask = Task { [weak self] in
-            let wait = max(0, until.timeIntervalSinceNow)
-            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-            guard !Task.isCancelled, let self else { return }
-            guard case .coolingDown = self.phase, !self.isBusy else { return }
-            self.phase = .ready
-            if self.automatic && self.isPresented { self.start(.create) }
-        }
-    }
-
-    /// Manual override during the pause: one attempt now.
-    func tryOnceNow() {
-        guard !isBusy else { return }
-        cooldownTask?.cancel()
-        phase = .ready
-        start(.create)
     }
 
     // MARK: - Lifecycle hooks (called by the view / app)
 
     func viewAppeared() {
         isPresented = true
-        if createOnNextAppear && !isBusy && hasLockdown && Self.activeCooldown() == nil {
+        if createOnNextAppear && !isBusy && hasLockdown {
             createOnNextAppear = false
             phase = .ready
             start(.create)
             return
         }
-        // Keep a failure on screen: re-opening the screen must not trigger a
-        // new attempt by itself (that is what kept hitting a throttled device).
-        if !isBusy && !isWaitingForRoute && !isStopped { phase = Self.initialPhase() }
-        if case .coolingDown = phase { scheduleCooldownEnd() }
+        if !isBusy && !isWaitingForRoute { phase = Self.initialPhase() }
         if automatic { startAutomatically() }
     }
 
@@ -255,12 +175,7 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
         guard !isBusy else { return }
         device = nil
         consecutiveRouteFailures = 0
-        if let cooldown = Self.activeCooldown() {
-            phase = Phase.coolingDown(until: cooldown.until, message: cooldown.message)
-        } else {
-            phase = .ready
-        }
-        if case .coolingDown = phase { scheduleCooldownEnd(); return }
+        phase = .ready
         if isPresented {
             if automatic { start(.create) }
         } else {
@@ -274,7 +189,7 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
     func startAutomatically() {
         guard !isBusy else { return }
         switch phase {
-        case .needsLockdown, .succeeded, .failed, .searching, .working, .coolingDown: return
+        case .needsLockdown, .succeeded, .failed, .searching, .working: return
         case .ready, .waitingForRoute: start(.create)
         }
     }
@@ -422,7 +337,6 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
                 let what = activeOperation == .create
                     ? "New RPPairing record created through the integrated usbmuxd companion and accepted by an independent pair-verify."
                     : "The imported RPPairing record passed pair-verify on the live device; a verified copy was written."
-                clearCooldown()
                 phase = .succeeded(file: url, message: what)
                 append("✓ Done.")
             } catch {
@@ -443,8 +357,6 @@ final class IntegratedUsbmuxdCompanion: ObservableObject {
             scheduleRetry(reason: message)
         } else if !attachedThisRun {
             phase = .waitingForRoute(reason: message, retryIn: 0)
-        } else if message.contains("(handshake)") {
-            beginCooldown(message: message)
         } else {
             phase = .failed(message: message)
         }
