@@ -199,3 +199,14 @@ API FFI nuove: `gasspair_mux_probe`, `gasspair_mux_create_rppairing`, `gasspair_
 - L'import e la verifica di un RPPairing esistente ora sono dentro **usbmuxd (integrated)** › *Existing RPPairing* (stessi controlli: campi, lunghezze, UUID, `alt_irk`, coppia Ed25519; la verifica è solo pair-verify sul dispositivo, senza PIN).
 - La schermata **usbmuxd (integrated)** e il ripiego **Mac companion** sono stati riscritti interamente con card Liquid Glass native (`glassEffect`, `.glass` / `.glassProminent`, `GlassEffectContainer` su iOS 26+; materiali traslucidi da iOS 16 a 25), con gli stessi modificatori del resto dell'app (`glassCard`, `pillButton`, `glassCapsule`) più `GlassComponents.swift`.
 - Le funzioni FFI `gasspair_create_rp_endpoint` / `gasspair_verify_rp_endpoint` restano nella libreria per compatibilità, ma l'app non le usa più.
+
+
+## Versione 2.4.2 — primo passaggio RPPairing più robusto
+
+Dopo una reinstallazione dell'app (o comunque quando sul dispositivo resta il record di un pairing precedente) remotepairingdeviced poteva chiudere il canale durante «Pairing through Lockdown» (`UnexpectedEof … without sending TLS close_notify`). Il primo passaggio ora prova, ciascuno su una connessione nuova:
+
+1. l'identità **upstream** (identificatore derivato dal nome host come `RpPairingFile::generate`, handshake → pair-verify → pair-setup): è ciò che fanno `idevice_pair` e il companion Mac e sostituisce il record precedente dello stesso host;
+2. se il dispositivo chiude il canale: **pair-setup diretto** (senza il pair-verify destinato a fallire) con un nome host univoco `GassPair-XXXXXX` e identificatore casuale, per non collidere con il record lasciato dalla corsa precedente;
+3. lo stesso, ancora una volta dopo una breve pausa.
+
+Si passa al tentativo successivo solo se il dispositivo chiude la connessione; un rifiuto esplicito o un timeout fermano subito. Il secondo passaggio e la verifica indipendente usano la stessa identità scelta; nessun file viene salvato se un passaggio fallisce. L'errore finale elenca tutti i tentativi con la causa reale.

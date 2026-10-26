@@ -357,6 +357,115 @@ async fn write_verified_copy(bytes: &[u8], path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// True when the device dropped the channel (EOF / reset / broken pipe),
+/// as opposed to an explicit protocol answer such as a rejection.
+fn is_channel_closed(e: &IdeviceError) -> bool {
+    match e {
+        IdeviceError::Socket(io) => matches!(
+            io.kind(),
+            std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::NotConnected
+        ),
+        _ => false,
+    }
+}
+
+/// Outcome of the first ("Pairing through Lockdown") pass.
+struct FirstPass {
+    file: RpPairingFile,
+    host: String,
+    peer: Option<PeerDevice>,
+}
+
+/// How a first-pass attempt talks to remotepairingdeviced.
+#[derive(Clone, Copy)]
+enum Strategy {
+    /// Exactly upstream `idevice-tools remotepairing-lockdown pair` /
+    /// `idevice_pair`: identifier derived from the sending host
+    /// (`RpPairingFile::generate`), handshake → pair-verify → pair-setup.
+    /// Re-pairing with the same host replaces the device's previous record.
+    Upstream,
+    /// Handshake → pair-setup directly (no doomed pair-verify of an unknown
+    /// identity first), under a unique sending host and a random identifier,
+    /// so it cannot collide with a record left on the device by an earlier run.
+    DirectUniqueHost,
+}
+
+/// Pass 1 with fallbacks. Some devices close the channel (TLS EOF) when a
+/// record from a previous run exists, e.g. after GassPair was reinstalled:
+/// a closed channel moves on to the next strategy on a fresh connection; an
+/// explicit device answer (rejection, timeout) stops immediately.
+async fn first_pass(provider: &EmbeddedMuxProvider, base: &str, cbs: &Callbacks) -> Result<FirstPass, Fail> {
+    let stage = "Pairing through Lockdown";
+    let plan = [
+        (Strategy::Upstream, "upstream identity"),
+        (Strategy::DirectUniqueHost, "direct pair-setup, new host identity"),
+        (Strategy::DirectUniqueHost, "direct pair-setup, new host identity (retry)"),
+    ];
+    let mut attempts: Vec<String> = Vec::new();
+    for (index, (strategy, what)) in plan.into_iter().enumerate() {
+        let (mut file, host) = match strategy {
+            Strategy::Upstream => (RpPairingFile::generate(base), base.to_string()),
+            Strategy::DirectUniqueHost => {
+                let file = fresh_pairing_file(base);
+                let suffix: String = file.identifier.chars().filter(|c| c.is_ascii_hexdigit()).take(6).collect();
+                let host = format!("{base}-{}", suffix.to_uppercase());
+                (file, host)
+            }
+        };
+        if index == 0 {
+            cbs.status(GASSPAIR_STATUS_RP_PAIRING, &format!("{stage}…"));
+        } else {
+            cbs.status(
+                GASSPAIR_STATUS_RP_PAIRING,
+                &format!("{stage}: the device closed the channel, retrying ({what}) as \"{host}\"…"),
+            );
+            tokio::time::sleep(Duration::from_secs(2 * index as u64)).await;
+        }
+
+        let service = open_service(provider, stage, cbs).await?;
+        let mut client = service
+            .into_client(&host)
+            .map_err(|e| Fail::Error(format!("{stage}: could not start the RPPairing client ({})", describe(&e))))?;
+        let pin = || async { LOCKDOWN_CHANNEL_PIN.to_string() };
+        let exchange = tokio::time::timeout(MUX_PAIR_PASS_TIMEOUT, async {
+            match strategy {
+                Strategy::Upstream => client.connect(&mut file, pin).await,
+                Strategy::DirectUniqueHost => {
+                    client.attempt_pair_verify().await?;
+                    client.pair(&mut file, pin).await
+                }
+            }
+        })
+        .await
+        .map_err(|_| Fail::Timeout(format!("{stage}: no answer from remotepairingdeviced within {} s", MUX_PAIR_PASS_TIMEOUT.as_secs())))?;
+
+        match exchange {
+            Ok(()) => {
+                let peer = client.paired_peer_device().ok().cloned();
+                if index > 0 {
+                    cbs.status(GASSPAIR_STATUS_RP_PAIRING, &format!("{stage}: accepted with \"{what}\" as \"{host}\"."));
+                }
+                return Ok(FirstPass { file, host, peer });
+            }
+            Err(e) => {
+                let closed = is_channel_closed(&e);
+                attempts.push(format!("{what} as \"{host}\": {}", describe(&e)));
+                if !closed {
+                    break;
+                }
+            }
+        }
+    }
+    Err(Fail::Error(format!(
+        "{stage}: RPPairing exchange failed. Attempts — {}. The device's remotepairingdeviced closed or refused the channel; no file was saved.",
+        attempts.join(" · ")
+    )))
+}
+
 // ---------------------------------------------------------------------------
 // Flows
 // ---------------------------------------------------------------------------
@@ -384,17 +493,15 @@ pub(crate) async fn create_flow(
     let trust = load_lockdown_trust(&lockdown_path, &cbs).await?;
     let attached = attach(&endpoints, &trust, &label, &cbs).await?;
 
-    let mut pairing_file: RpPairingFile = fresh_pairing_file(&label);
-    let mut peer: Option<PeerDevice> = None;
-    for (index, stage) in ["Pairing through Lockdown", "Saving the pairing on the device"]
-        .into_iter()
-        .enumerate()
+    // Pass 1 with fallbacks (see `first_pass`), then pass 2 with the same
+    // identity and sending host, exactly like upstream.
+    let FirstPass { file: mut pairing_file, host, peer } = first_pass(&attached.provider, &label, &cbs).await?;
     {
-        let code = if index == 0 { GASSPAIR_STATUS_RP_PAIRING } else { GASSPAIR_STATUS_RP_CONFIRMING };
-        cbs.status(code, &format!("{stage}…"));
+        let stage = "Saving the pairing on the device";
+        cbs.status(GASSPAIR_STATUS_RP_CONFIRMING, &format!("{stage}…"));
         let service = open_service(&attached.provider, stage, &cbs).await?;
         let mut client = service
-            .into_client(&label)
+            .into_client(&host)
             .map_err(|e| Fail::Error(format!("{stage}: could not start the RPPairing client ({})", describe(&e))))?;
         tokio::time::timeout(
             MUX_PAIR_PASS_TIMEOUT,
@@ -403,9 +510,6 @@ pub(crate) async fn create_flow(
         .await
         .map_err(|_| Fail::Timeout(format!("{stage}: no answer from remotepairingdeviced within {} s", MUX_PAIR_PASS_TIMEOUT.as_secs())))?
         .map_err(|e| Fail::Error(format!("{stage}: RPPairing exchange failed ({})", describe(&e))))?;
-        if peer.is_none() {
-            peer = client.paired_peer_device().ok().cloned();
-        }
     }
 
     // Third, fresh connection: verify only, never fall back to setup.
@@ -413,7 +517,7 @@ pub(crate) async fn create_flow(
     cbs.status(GASSPAIR_STATUS_RP_VERIFYING, &format!("{stage} on a fresh connection…"));
     let service = open_service(&attached.provider, stage, &cbs).await?;
     let mut verifier = service
-        .into_client(&label)
+        .into_client(&host)
         .map_err(|e| Fail::Error(format!("{stage}: could not start the verification client ({})", describe(&e))))?;
     tokio::time::timeout(MUX_VERIFY_TIMEOUT, async {
         verifier
