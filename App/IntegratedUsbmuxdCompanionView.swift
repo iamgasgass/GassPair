@@ -148,6 +148,36 @@ struct IntegratedUsbmuxdCompanionView: View {
                     companion.start(.create)
                 }
 
+            case .coolingDown(let until, let message):
+                Label("The iPhone refused the pairing channel", systemImage: "hourglass")
+                    .font(.headline)
+                    .foregroundStyle(.orange)
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let remaining = max(0, Int(until.timeIntervalSince(context.date)))
+                    Text(remaining > 0
+                         ? "Automatic attempts paused for \(remaining / 60):\(String(format: "%02d", remaining % 60)) so remotepairingdeviced can recover. One attempt follows by itself afterwards."
+                         : "Pause over: one new attempt starts by itself.")
+                        .font(.footnote)
+                        .monospacedDigit()
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Restart the iPhone (clears a throttled pairing service)", systemImage: "1.circle")
+                    Label("Unlock it, switch LocalDevVPN on, open GassPair", systemImage: "2.circle")
+                    Label("Keep the screen on until the attempt finishes", systemImage: "3.circle")
+                }
+                .font(.caption)
+                Text("Already have the RPPairing exported from the earlier successful run? That record is still valid on the device: import it in Existing RPPairing below instead of creating a new one.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(4)
+                secondaryButton("Try once now", systemImage: "arrow.clockwise") { companion.tryOnceNow() }
+
             case .failed(let message):
                 Label("Stopped", systemImage: "xmark.octagon.fill")
                     .font(.headline)

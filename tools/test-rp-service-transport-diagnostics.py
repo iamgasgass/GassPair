@@ -17,6 +17,9 @@ checks = {
     "callback copies the C string synchronously": "String(cString: $0)" in engine,
     "runs are cancellable": "gasspair_session_cancel(session)" in engine,
     "failures after attach do not loop automatically": "phase = .failed(message: message)" in engine,
+    "handshake refusal starts a persisted cooldown": "beginCooldown(message: message)" in engine and "gasspair.mux.cooldownUntil" in engine,
+    "re-opening the screen does not retry a stopped run": "!isStopped" in engine and ".coolingDown" in engine,
+    "cooldown has a manual override": "func tryOnceNow()" in engine and "companion.tryOnceNow()" in (root / "App/IntegratedUsbmuxdCompanionView.swift").read_text(),
 }
 failed = False
 for label, passed in checks.items():
